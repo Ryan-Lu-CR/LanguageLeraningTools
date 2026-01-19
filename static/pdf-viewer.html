@@ -1,0 +1,1832 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>PDF 查看器</title>
+    <link rel="stylesheet" href="/static/lib/pdf_viewer.min.css">
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #111827;
+            --accent: #38bdf8;
+            --text: #e5e7eb;
+            --muted: #94a3b8;
+            --border: #1f2937;
+            --hover: rgba(56, 189, 248, 0.1);
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        html, body { 
+            width: 100%; 
+            height: 100%; 
+            background: radial-gradient(circle at 20% 20%, rgba(56, 189, 248, 0.08), transparent 25%),
+                        radial-gradient(circle at 80% 0%, rgba(52, 211, 153, 0.08), transparent 20%),
+                        var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            overflow: hidden;
+        }
+        
+        #toolbar { 
+            height: 56px;
+            background: rgba(17, 24, 39, 0.95);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 0 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            z-index: 100;
+            position: relative;
+        }
+        
+        #toolbar button, #toolbar input { 
+            padding: 8px 16px;
+            border: 1px solid var(--border);
+            background: var(--panel);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            height: 36px;
+            color: var(--text);
+            transition: all 0.2s ease;
+        }
+        
+        #toolbar button:hover { 
+            background: var(--hover);
+            border-color: var(--accent);
+            transform: translateY(-1px);
+        }
+        
+        #toolbar button:active {
+            transform: translateY(0);
+        }
+        
+        #toolbar button:disabled { 
+            opacity: 0.3;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        #toolbar input { 
+            width: 70px;
+            text-align: center;
+            background: var(--bg);
+        }
+        
+        #toolbar span {
+            color: var(--muted);
+            font-size: 14px;
+        }
+        
+        #current-page-display {
+            color: var(--accent);
+            font-weight: 600;
+        }
+        
+        .sep { 
+            width: 1px;
+            height: 28px;
+            background: var(--border);
+            margin: 0 6px;
+        }
+        
+        #container { 
+            position: absolute;
+            top: 56px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            background: var(--bg);
+            padding: 20px;
+        }
+        
+        /* 自定义滚动条 */
+        #container::-webkit-scrollbar {
+            width: 12px;
+        }
+        
+        #container::-webkit-scrollbar-track {
+            background: var(--panel);
+            border-left: 1px solid var(--border);
+        }
+        
+        #container::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 6px;
+            border: 2px solid var(--panel);
+        }
+        
+        #container::-webkit-scrollbar-thumb:hover {
+            background: var(--muted);
+        }
+        
+        #pages-container { 
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 24px;
+            min-height: 100%;
+        }
+        
+        .page-wrapper {
+            position: relative;
+            background: white;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6),
+                        0 0 0 1px rgba(56, 189, 248, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            /* 禁用悬停位移以防鼠标移动时页面抖动 */
+            transition: box-shadow 0.2s ease;
+        }
+        
+        .page-wrapper:hover {
+            box-shadow: 0 12px 40px rgba(0,0,0,0.7),
+                        0 0 0 1px rgba(56, 189, 248, 0.3);
+        }
+        
+        .page-canvas { display: block; }
+        
+        .textLayer { 
+            position: absolute;
+            left: 0;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            overflow: hidden;
+            line-height: 1.0;
+            opacity: 1;
+        }
+        
+        .textLayer > span,
+        .textLayer > div { 
+            /* 默认PDF.js让文本透明，仅用于选中，但我们需要对高亮词显示颜色 */
+            color: transparent;
+            text-shadow: none;
+            position: absolute;
+            white-space: pre;
+            cursor: text;
+            transform-origin: 0% 0%;
+        }
+
+        /* 高亮/生词span 强制显示颜色，覆盖透明文本 */
+        .textLayer > span.pdf-vocab-highlight,
+        .textLayer > div.pdf-vocab-highlight {
+            color: #1e3a8a !important;
+            text-shadow: 0 0 0 #1e3a8a !important;
+        }
+        .textLayer > span.pdf-vocab-word,
+        .textLayer > div.pdf-vocab-word {
+            color: #0f172a !important;
+            text-shadow: 0 0 0 #0f172a !important;
+        }
+        
+        .textLayer ::selection { 
+            background: rgba(56, 189, 248, 0.5);
+        }
+        
+        .textLayer::-moz-selection { 
+            background: rgba(56, 189, 248, 0.5);
+        }
+        
+        .annotationLayer { 
+            position: absolute;
+            left: 0;
+            top: 0;
+            right: 0;
+            bottom: 0;
+        }
+        
+        #loading { 
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(17, 24, 39, 0.98);
+            backdrop-filter: blur(12px);
+            color: var(--text);
+            padding: 40px 60px;
+            border-radius: 12px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            z-index: 1000;
+            border: 1px solid var(--border);
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+        
+        .spinner { 
+            width: 48px;
+            height: 48px;
+            border: 4px solid var(--border);
+            border-top: 4px solid var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto;
+        }
+        
+        @keyframes spin { 
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error { 
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(244, 63, 94, 0.95);
+            backdrop-filter: blur(12px);
+            color: white;
+            padding: 24px 48px;
+            border-radius: 12px;
+            display: none;
+            z-index: 1000;
+            max-width: 80%;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        }
+        
+        .page-number { 
+            position: absolute;
+            top: -36px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(17, 24, 39, 0.95);
+            backdrop-filter: blur(8px);
+            color: var(--accent);
+            padding: 6px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        
+        /* 划词气泡样式 - 匹配主应用风格 */
+        .vocab-bubble { 
+            position: fixed;
+            background: rgba(11, 18, 33, 0.98);
+            border: 2px solid var(--accent);
+            border-radius: 8px;
+            padding: 12px 14px;
+            box-shadow: 0 6px 30px rgba(56, 189, 248, 0.4), 0 0 20px rgba(56, 189, 248, 0.2);
+            z-index: 10000;
+            min-width: 160px;
+            max-width: 280px;
+            animation: bubbleIn 120ms ease cubic-bezier(0.34, 1.56, 0.64, 1);
+            backdrop-filter: blur(10px);
+            pointer-events: auto;
+            will-change: transform, opacity;
+        }
+        
+        @keyframes bubbleIn {
+            from {
+                opacity: 0;
+                transform: scale(0.85) translateY(8px);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+        
+        .vocab-bubble .bubble-word { 
+            font-weight: 700;
+            color: #38bdf8;
+            font-size: 15px;
+            margin-bottom: 8px;
+            border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+            padding-bottom: 8px;
+            word-break: break-word;
+        }
+        
+        .vocab-bubble .bubble-meaning { 
+            color: #cbd5e1;
+            font-size: 13px;
+            margin-bottom: 6px;
+            line-height: 1.5;
+            max-height: 60px;
+            overflow-y: auto;
+        }
+        
+        .vocab-bubble .bubble-note { 
+            color: #a7f3d0;
+            font-size: 12px;
+            margin-bottom: 8px;
+            line-height: 1.4;
+            padding: 6px;
+            background: rgba(34, 211, 153, 0.1);
+            border-left: 2px solid rgba(34, 211, 153, 0.5);
+            border-radius: 2px;
+        }
+        
+        .vocab-bubble .bubble-buttons { 
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        
+        .vocab-bubble .bubble-note-btn { 
+            width: 100%;
+            padding: 8px 10px;
+            background: linear-gradient(135deg, rgba(34, 211, 153, 0.15), rgba(56, 189, 248, 0.1));
+            border: 1px solid rgba(34, 211, 153, 0.6);
+            color: #6ee7b7;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 100ms ease;
+            user-select: none;
+        }
+        
+        .vocab-bubble .bubble-note-btn:hover { 
+            background: linear-gradient(135deg, rgba(34, 211, 153, 0.3), rgba(56, 189, 248, 0.2));
+            border-color: #34d399;
+            color: #d1fae5;
+            box-shadow: 0 0 12px rgba(34, 211, 153, 0.3);
+        }
+        
+        .vocab-bubble .bubble-note-btn:active {
+            transform: scale(0.98);
+        }
+        
+        /* 气泡编辑表单 */
+        .bubble-edit-form { 
+            margin-top: 10px;
+        }
+        
+        .bubble-form-group { 
+            margin-bottom: 10px;
+        }
+
+        .bubble-form-group label {
+            display: block;
+            font-size: 11px;
+            color: #94a3b8;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .bubble-input,
+        .bubble-textarea { 
+            width: 100%;
+            padding: 8px 10px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            border-radius: 4px;
+            color: #e2e8f0;
+            font-size: 13px;
+            font-family: inherit;
+            transition: all 150ms ease;
+            resize: vertical;
+        }
+        
+        .bubble-input:focus,
+        .bubble-textarea:focus {
+            outline: none;
+            border-color: #38bdf8;
+            background: rgba(15, 23, 42, 0.8);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+        }
+        
+        .bubble-textarea {
+            min-height: 50px;
+            line-height: 1.4;
+        }
+        
+        .bubble-buttons { 
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        
+        .bubble-save-btn,
+        .bubble-cancel-btn { 
+            flex: 1;
+            padding: 8px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 100ms ease;
+            user-select: none;
+        }
+        
+        .bubble-save-btn { 
+            background: linear-gradient(135deg, rgba(34, 211, 153, 0.2), rgba(56, 189, 248, 0.15));
+            border: 1px solid rgba(34, 211, 153, 0.6);
+            color: #6ee7b7;
+        }
+        
+        .bubble-save-btn:hover { 
+            background: linear-gradient(135deg, rgba(34, 211, 153, 0.3), rgba(56, 189, 248, 0.2));
+            border-color: #34d399;
+            color: #d1fae5;
+            box-shadow: 0 0 12px rgba(34, 211, 153, 0.3);
+        }
+        
+        .bubble-save-btn:active {
+            transform: scale(0.97);
+        }
+        
+        .bubble-cancel-btn { 
+            background: rgba(248, 113, 113, 0.1);
+            border: 1px solid rgba(248, 113, 113, 0.4);
+            color: #fca5a5;
+        }
+        
+        .bubble-cancel-btn:hover { 
+            background: rgba(248, 113, 113, 0.2);
+            border-color: #f87171;
+            color: #fecaca;
+            box-shadow: 0 0 12px rgba(248, 113, 113, 0.2);
+        }
+        
+        .bubble-cancel-btn:active {
+            transform: scale(0.97);
+        }
+        
+        /* PDF词汇高亮和浮窗 - 与文本阅读和字幕一致 */
+        
+        /* 已添加批注的词 - 黄色高亮（最醒目的方案） */
+        .pdf-vocab-highlight {
+            background: #ffeb3b !important;  /* 明黄色，用!important确保应用 */
+            cursor: pointer;
+            color: #000;
+            transition: all 150ms ease;
+            padding: 0;
+            margin: 0;
+            border-radius: 1px;
+            box-shadow: none;
+            text-decoration-line: underline;
+            text-decoration-style: wavy;
+            text-decoration-color: #f59e0b;
+            text-decoration-thickness: 1px;
+            text-underline-offset: 1px;
+            text-decoration-skip-ink: none;
+            text-decoration-skip: none;
+            line-height: inherit;
+        }
+        
+        .pdf-vocab-highlight:hover {
+            background: linear-gradient(180deg, transparent 30%, rgba(255, 230, 92, 0.5) 30%, rgba(255, 230, 92, 0.5) 80%, transparent 80%) !important;
+            color: #000;
+        }
+        
+        /* 未添加批注的词 - 轻微高亮 */
+        .pdf-vocab-word {
+            cursor: pointer;
+            transition: all 150ms ease;
+            position: relative;
+            padding: 0;
+            margin: 0;
+            line-height: inherit;
+            text-decoration-line: underline;
+            text-decoration-style: wavy;
+            text-decoration-color: #60a5fa;
+            text-decoration-thickness: 1px;
+            text-underline-offset: 1px;
+            text-decoration-skip-ink: none;
+            text-decoration-skip: none;
+        }
+        
+        .pdf-vocab-word:hover {
+            color: inherit;
+            background: linear-gradient(180deg, transparent 30%, rgba(96, 165, 250, 0.25) 30%, rgba(96, 165, 250, 0.25) 80%, transparent 80%);
+        }
+        
+        /* PDF词汇浮窗 - 与文本阅读、字幕浮窗样式一致 */
+        .pdf-vocab-bubble {
+            position: fixed;
+            background: linear-gradient(135deg, #1e3a5f 0%, #1a2332 100%);
+            border: 1px solid rgba(56, 189, 248, 0.4);
+            border-radius: 8px;
+            padding: 12px 14px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 20px rgba(56, 189, 248, 0.2);
+            z-index: 9999;
+            max-width: 280px;
+            min-width: 150px;
+            animation: bubbleIn 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+            pointer-events: auto;
+        }
+        
+        .pdf-vocab-bubble .bubble-word {
+            font-weight: 700;
+            color: #38bdf8;
+            font-size: 16px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+            padding-bottom: 6px;
+        }
+        
+        .pdf-vocab-bubble .bubble-meaning {
+            color: #cbd5e1;
+            font-size: 12px;
+            margin-bottom: 4px;
+            line-height: 1.4;
+        }
+        
+        .pdf-vocab-bubble .bubble-note {
+            color: #a7f3d0;
+            font-size: 13px;
+            line-height: 1.4;
+            padding: 6px;
+            background: rgba(34, 211, 153, 0.08);
+            border-left: 2px solid rgba(34, 211, 153, 0.4);
+            border-radius: 2px;
+            margin: 0;
+        }
+    </style>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div id="toolbar">
+        <span id="current-page-display">页 1</span>
+        <span>/</span>
+        <span id="total-pages">0</span>
+        <div class="sep"></div>
+        <button id="zoom-out">−</button>
+        <input id="scale" type="text" value="auto" placeholder="auto">
+        <span id="scale-label">(自适应)</span>
+        <button id="zoom-in">+</button>
+        <div class="sep"></div>
+        <button id="fit-width">适应宽度</button>
+        <button id="fit-page">适应页面</button>
+    </div>
+    <div id="container">
+        <div id="pages-container"></div>
+    </div>
+    <div id="loading"><div class="spinner"></div>加载 PDF 中...</div>
+    <div class="error" id="error"></div>
+    <script src="/static/lib/pdf.min.js"></script>
+    <script>
+        console.log('🔍 PDF Viewer loaded - Version 3.0 (Continuous Scroll)');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/lib/pdf.worker.min.js';
+        
+        const params = new URLSearchParams(window.location.search);
+        let pdfUrl = params.get('file');
+        const paramVocabBookId = params.get('vocabBookId') || null;
+        if (pdfUrl && !pdfUrl.startsWith('http')) {
+            pdfUrl = new URL(pdfUrl, window.location.origin).href;
+        }
+        
+        if (!pdfUrl) { 
+            document.getElementById('error').textContent = '错误：未指定 PDF 文件'; 
+            document.getElementById('error').style.display = 'block'; 
+            throw new Error('No file'); 
+        }
+        
+        let pdf = null, numPages = 0, currentScale = 'auto';
+        const container = document.getElementById('container');
+        const pagesContainer = document.getElementById('pages-container');
+        
+        // ============================================================================
+        // PDF缓存管理 - 保存和恢复用户的阅读进度
+        // ============================================================================
+        let pdfCacheData = null;  // 当前缓存数据
+        let cacheAutoSaveTimeout = null;  // 防抖计时器
+        
+        /**
+         * 生成PDF缓存的唯一键名（基于文件URL）
+         */
+        function getPdfCacheName() {
+            // 从URL中提取文件名
+            const urlObj = new URL(pdfUrl);
+            const pathname = urlObj.pathname;
+            const filename = pathname.substring(pathname.lastIndexOf('/') + 1) || 'unknown.pdf';
+            return filename;
+        }
+        
+        /**
+         * 保存PDF缓存到服务器
+         */
+        async function savePdfCache() {
+            try {
+                const cacheData = {
+                    pdfFilename: getPdfCacheName(),
+                    currentPage: parseInt(document.getElementById('current-page-display').textContent.match(/\\d+/)?.[0] || 1),
+                    scale: currentScale,
+                    scrollTop: container.scrollTop,
+                    displayMode: 'continuous'
+                };
+                
+                const response = await fetch('/api/pdf-cache/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cacheData)
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    console.log('💾 PDF缓存已保存:', getPdfCacheName());
+                } else {
+                    console.warn('⚠️ PDF缓存保存失败:', result.error);
+                }
+            } catch (e) {
+                console.error('❌ 保存PDF缓存时出错:', e);
+            }
+        }
+        
+        /**
+         * 加载PDF缓存（防止重复渲染）
+         */
+        async function loadPdfCache() {
+            try {
+                const response = await fetch('/api/pdf-cache/load', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pdfFilename: getPdfCacheName() })
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success' && result.found && result.cache) {
+                    pdfCacheData = result.cache;
+                    console.log('✅ 加载PDF缓存:', pdfCacheData);
+                    return result.cache;
+                } else {
+                    console.log('ℹ️ 没有找到PDF缓存，将从第1页开始');
+                    return null;
+                }
+            } catch (e) {
+                console.error('❌ 加载PDF缓存时出错:', e);
+                return null;
+            }
+        }
+        
+        /**
+         * 应用缓存的用户状态（缩放、滚动位置等）
+         */
+        async function applyCacheState(cache) {
+            if (!cache) return;
+            
+            try {
+                // 应用缩放级别（但不重新渲染，渲染会在调用者中完成）
+                if (cache.scale) {
+                    currentScale = cache.scale;
+                    if (cache.scale === 'auto' || cache.scale === 'fit-width') {
+                        document.getElementById('scale').value = 'auto';
+                        document.getElementById('scale-label').textContent = '(适应宽度)';
+                    } else if (cache.scale === 'fit-page') {
+                        document.getElementById('scale').value = 'auto';
+                        document.getElementById('scale-label').textContent = '(适应页面)';
+                    } else {
+                        const scalePercent = typeof cache.scale === 'number' ? Math.round(cache.scale * 100) : parseInt(cache.scale);
+                        document.getElementById('scale').value = scalePercent;
+                        document.getElementById('scale-label').textContent = '%';
+                    }
+                    // 不要在这里重新渲染，渲染会在调用者中完成
+                    console.log('📐 应用缩放级别:', cache.scale);
+                }
+            } catch (e) {
+                console.error('❌ 应用缓存状态时出错:', e);
+            }
+        }
+        
+        /**
+         * 防抖保存缓存（滚动时）
+         */
+        function debouncedSavePdfCache() {
+            // 清除之前的计时器
+            if (cacheAutoSaveTimeout) {
+                clearTimeout(cacheAutoSaveTimeout);
+            }
+            
+            // 设置新的计时器（1秒后保存）
+            cacheAutoSaveTimeout = setTimeout(() => {
+                savePdfCache();
+            }, 1000);
+        }
+        
+        /**
+         * 页面卸载时保存缓存
+         */
+        window.addEventListener('beforeunload', () => {
+            // 立即保存，不用防抖
+            savePdfCache();
+        });
+        
+        // 获取生词本数据（优先使用多生词本新格式）
+        let vocabData = [];
+        let vocabBooks = [];
+        let currentVocabBookId = null;
+        let settings = {};
+
+        async function loadSettings() {
+            try {
+                const res = await fetch('/api/settings/load');
+                const data = await res.json();
+                if (data && data.status === 'success') {
+                    settings = data.settings || {};
+                }
+            } catch (e) {
+                console.warn('⚠️ 加载设置失败，使用默认', e);
+                settings = {};
+            }
+        }
+
+        function pickCurrentBookId(books, currentId, settings) {
+            if (currentId && books.find(b => b.id === currentId)) return currentId;
+            if (!books || books.length === 0) return null;
+            const common = settings.commonDefaultVocab;
+            if (common) {
+                const cv = books.find(b => b.name === '默认生词本（通用）');
+                if (cv) return cv.id;
+            } else {
+                const rv = books.find(b => b.name === '默认生词本（阅读）') || books.find(b => b.name === '默认生词本(阅读)');
+                if (rv) return rv.id;
+            }
+            return books[0].id;
+        }
+
+        async function loadVocabData() {
+            console.log('📚 开始加载生词本...');
+            try {
+                await loadSettings();
+                // 先尝试新格式
+                const response = await fetch('/api/vocabbooks/load');
+                const data = await response.json();
+                console.log('📥 生词本API响应:', data);
+                
+                if (data && data.status === 'success' && Array.isArray(data.vocabBooks)) {
+                    vocabBooks = data.vocabBooks;
+                    console.log('📖 生词本数量:', vocabBooks.length);
+                    
+                    // 如果父页面传入了当前生词本ID，则优先使用它
+                    if (paramVocabBookId && vocabBooks.find(b => b.id === paramVocabBookId)) {
+                        currentVocabBookId = paramVocabBookId;
+                        console.log('✓ 使用传入的生词本ID:', paramVocabBookId);
+                    } else {
+                        currentVocabBookId = pickCurrentBookId(vocabBooks, data.currentVocabBookId, settings);
+                        console.log('✓ 选择默认生词本:', currentVocabBookId);
+                    }
+                    
+                    const currentBook = vocabBooks.find(b => b.id === currentVocabBookId);
+                    vocabData = currentBook ? (currentBook.words || []) : [];
+                    console.log('✅ 生词本加载成功: 本名=', currentBook ? currentBook.name : '未选择', ', 词数=', vocabData.length);
+                    
+                    // 打印前几个词汇用于调试
+                    if (vocabData.length > 0) {
+                        console.log('📋 词汇示例:', vocabData.slice(0, 3).map(w => w.word).join(', '));
+                    }
+                    return;
+                }
+            } catch (e) {
+                console.error('❌ 多生词本加载失败:', e);
+            }
+            
+            // 旧格式降级
+            try {
+                console.log('🔄 尝试旧格式生词本...');
+                const res2 = await fetch('/api/vocab/load');
+                const data2 = await res2.json();
+                vocabData = data2.vocab || [];
+                console.log('✅ 生词本(旧格式)加载成功，共', vocabData.length, '个词');
+            } catch (e2) {
+                console.error('❌ 生词本加载完全失败:', e2);
+                vocabData = [];
+            }
+        }
+        
+        // 保存生词到生词本
+        async function saveToVocab(word, meaning, note) {
+            try {
+                // 优先保存到多生词本
+                if (Array.isArray(vocabBooks) && currentVocabBookId) {
+                    const currentBookIdx = vocabBooks.findIndex(b => b.id === currentVocabBookId);
+                    if (currentBookIdx >= 0) {
+                        const words = vocabBooks[currentBookIdx].words || [];
+                        const idx = words.findIndex(v => v.word && v.word.toLowerCase() === word.toLowerCase());
+                        if (idx >= 0) {
+                            words[idx].meaning = meaning;
+                            words[idx].note = note;
+                        } else {
+                            words.push({ id: Date.now().toString(), word, meaning, note, source: 'reading' });
+                        }
+                        vocabBooks[currentBookIdx].words = words;
+                        vocabData = words;
+
+                        const resp = await fetch('/api/vocabbooks/save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ vocabBooks, currentVocabBookId })
+                        });
+                        const result = await resp.json();
+                        const ok = result && result.status === 'success';
+                        if (ok) {
+                            // 通知父页面（如果在iframe中）刷新生词本显示
+                            try { window.parent.postMessage({ type: 'vocabBooksUpdated' }, '*'); } catch {}
+                            console.log('✅ 保存成功:', word);
+                            refreshAllTextLayerHighlights();
+                            return true;
+                        } else {
+                            console.warn('⚠️ 保存返回非成功(新格式):', result);
+                        }
+                    }
+                }
+
+                // 备用：旧格式保存
+                const existingIndex = vocabData.findIndex(v => v.word.toLowerCase() === word.toLowerCase());
+                if (existingIndex >= 0) {
+                    vocabData[existingIndex] = { word, meaning, note };
+                } else {
+                    vocabData.push({ word, meaning, note });
+                }
+                const response = await fetch('/api/vocab/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ vocab: vocabData })
+                });
+                const result = await response.json();
+                const ok2 = (result && (result.status === 'success' || result.success === true));
+                if (ok2) {
+                    console.log('✅ 保存成功(旧格式):', word);
+                    refreshAllTextLayerHighlights();
+                    return true;
+                }
+            } catch (e) {
+                console.error('❌ 保存失败:', e);
+            }
+            return false;
+        }
+        
+        // 创建气泡编辑模式
+        function showBubbleEditMode(bubble, word, vocabItem) {
+            const meaning = vocabItem ? vocabItem.meaning || '' : '';
+            const note = vocabItem ? vocabItem.note || '' : '';
+            
+            bubble.innerHTML = `
+                <div class="bubble-word">${word}</div>
+                <div class="bubble-edit-form">
+                    <div class="bubble-form-group">
+                        <label>释义</label>
+                        <input type="text" class="bubble-input edit-meaning" placeholder="输入释义..." value="${meaning}">
+                    </div>
+                    <div class="bubble-form-group">
+                        <label>批注</label>
+                        <textarea class="bubble-textarea edit-note" placeholder="输入批注（Shift+回车换行）...">${note}</textarea>
+                    </div>
+                    <div class="bubble-buttons">
+                        <button class="bubble-cancel-btn">✖ 取消</button>
+                        <button class="bubble-save-btn">💾 保存</button>
+                    </div>
+                </div>
+            `;
+            
+            const saveBtn = bubble.querySelector('.bubble-save-btn');
+            const cancelBtn = bubble.querySelector('.bubble-cancel-btn');
+            const meaningInput = bubble.querySelector('.edit-meaning');
+            const noteInput = bubble.querySelector('.edit-note');
+            
+            // 执行保存
+            const performSave = async () => {
+                const newMeaning = meaningInput.value.trim();
+                const newNote = noteInput.value.trim();
+                
+                const success = await saveToVocab(word, newMeaning, newNote);
+                if (success) {
+                    bubble.remove();
+                    window.getSelection().removeAllRanges();
+                }
+            };
+            
+            // 保存按钮点击
+            saveBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                performSave();
+            }, true);
+            
+            // 取消按钮点击
+            cancelBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                bubble.remove();
+                window.getSelection().removeAllRanges();
+            }, true);
+            
+            // 自动聚焦到释义输入框
+            setTimeout(() => {
+                meaningInput.focus();
+                
+                // 释义输入框：回车保存
+                meaningInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        performSave();
+                    }
+                });
+                
+                // 批注文本框：Shift+回车换行，回车保存
+                noteInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        if (e.shiftKey) {
+                            // Shift+回车：换行，不保存
+                            return;
+                        } else {
+                            // 回车：保存
+                            e.preventDefault();
+                            performSave();
+                        }
+                    }
+                });
+            }, 0);
+        }
+        
+        // ============================================================================
+        // PDF词汇高亮和浮窗 - 与文本阅读和字幕一致的体验
+        // ============================================================================
+
+        // 重新对已渲染页面的文本层执行高亮（用于新增或修改词汇后立即生效）
+        function refreshAllTextLayerHighlights() {
+            const layers = document.querySelectorAll('.textLayer');
+            layers.forEach(layer => {
+                try {
+                    highlightVocabInPdfTextLayer(layer);
+                } catch (e) {
+                    console.warn('⚠️ 刷新高亮失败:', e);
+                }
+            });
+        }
+        
+        /**
+         * 在PDF文本层中高亮生词本词汇
+         * 与文本阅读模块中的 highlightReadingVocabInContent() 功能一致
+         */
+        function highlightVocabInPdfTextLayer(textLayer) {
+            console.log('🔍 [高亮开始] 生词数据:', vocabData ? vocabData.length : 0);
+            
+            if (!vocabData || !vocabData.length) {
+                console.warn('⚠️ 生词本为空，跳过高亮');
+                return;
+            }
+            
+            // 生成词汇列表
+            const vocabItems = vocabData
+                .filter(w => w.word && w.word.trim())
+                .map(w => ({
+                    word: w.word,
+                    wordLower: w.word.toLowerCase(),
+                    meaning: w.meaning || '',
+                    note: w.note || '',
+                    hasNote: !!(w.note)
+                }));
+            
+            console.log('📚 有效词汇数:', vocabItems.length);
+            
+            if (!vocabItems.length) return;
+            
+            // 获取所有文本节点容器（新版PDF.js可能用div而非span）
+            const allSpans = textLayer.querySelectorAll('span, div');
+            console.log('📄 总span数:', allSpans.length);
+            
+            // 过滤出有文本内容的span/div
+            const textSpans = Array.from(allSpans).filter(span => {
+                const text = span.textContent || '';
+                return text.trim().length > 0;
+            });
+            
+            console.log('📝 有内容的span数:', textSpans.length);
+            
+            if (!textSpans.length) {
+                console.warn('⚠️ 没有找到文本内容的span');
+                return;
+            }
+            
+            let totalHighlights = 0;
+            let processedSpans = 0;
+            
+            // 处理每个文本span
+            textSpans.forEach((span, spanIdx) => {
+                processedSpans++;
+                const text = span.textContent;
+                const matches = [];
+                
+                // 前几个span输出详细信息用于调试
+                if (spanIdx < 3) {
+                    console.log(`📝 [span${spanIdx}] 原文本: "${text.substring(0, 80)}${text.length > 80 ? '...' : ''}"`);
+                    console.log(`   文本长度: ${text.length}，词汇长度范围: 1-${Math.max(...vocabItems.map(v => v.word.length))}`);
+                }
+                
+                // 查找匹配的词汇
+                vocabItems.forEach(item => {
+                    const wordLower = item.word.toLowerCase();
+                    const textLower = text.toLowerCase();
+                    
+                    let searchIdx = 0;
+                    let foundCount = 0;
+                    
+                    while (true) {
+                        const foundIdx = textLower.indexOf(wordLower, searchIdx);
+                        if (foundIdx === -1) break;
+                        
+                        foundCount++;
+                        
+                        // 改进的边界检查
+                        const before = foundIdx > 0 ? text[foundIdx - 1] : '';
+                        const after = foundIdx + item.word.length < text.length 
+                            ? text[foundIdx + item.word.length] 
+                            : '';
+                        
+                        // 检查是否是单词边界
+                        const isWordBefore = /[a-zA-Z0-9а-яА-ЯёЁ]/.test(before);
+                        const isWordAfter = /[a-zA-Z0-9а-яА-ЯёЁ]/.test(after);
+                        
+                        // 新规则：只要前或后不是字母，就认为是词汇边界
+                        if (!isWordBefore || !isWordAfter) {
+                            matches.push({
+                                index: foundIdx,
+                                len: item.word.length,
+                                item,
+                                text: text.substr(foundIdx, item.word.length)
+                            });
+                            
+                            if (spanIdx < 2) {
+                                console.log(`  ✓ [span${spanIdx}] 匹配 "${item.word}" @ 位置${foundIdx}, 上下文: "...${text.substring(Math.max(0, foundIdx-10), Math.min(text.length, foundIdx+item.word.length+10))}..."`);
+                            }
+                        }
+                        searchIdx = foundIdx + 1;
+                    }
+                    
+                    // 如果在前几个span中找到词汇，输出提示
+                    if (spanIdx < 2 && foundCount > 0) {
+                        console.log(`  📌 "${item.word}" 在文本中出现 ${foundCount} 次，有效匹配: ${matches.filter(m => m.item.word === item.word).length} 次`);
+                    }
+                });
+                
+                if (!matches.length) return;
+                
+                // 去重并排序
+                matches.sort((a, b) => a.index - b.index);
+                const uniqueMatches = [];
+                let lastIdx = -1;
+                matches.forEach(m => {
+                    if (m.index !== lastIdx) {
+                        uniqueMatches.push(m);
+                        lastIdx = m.index;
+                    }
+                });
+                
+                // 重建DOM
+                const frag = document.createDocumentFragment();
+                let cursor = 0;
+                
+                uniqueMatches.forEach(m => {
+                    if (m.index > cursor) {
+                        frag.appendChild(document.createTextNode(text.slice(cursor, m.index)));
+                    }
+                    
+                    const hSpan = document.createElement('span');
+                    hSpan.className = m.item.hasNote ? 'pdf-vocab-highlight' : 'pdf-vocab-word';
+                    hSpan.textContent = m.text;
+                    hSpan.dataset.word = m.item.wordLower;
+                    hSpan.dataset.meaning = m.item.meaning;
+                    hSpan.dataset.note = m.item.note;
+                    
+                    // 添加强制内联样式，确保显示
+                    if (m.item.hasNote) {
+                        hSpan.style.cssText = `
+                            background: #ffeb3b !important;
+                            color: #000 !important;
+                            padding: 0 !important;
+                            margin: 0 !important;
+                            border-radius: 1px !important;
+                            cursor: pointer !important;
+                            display: inline !important;
+                            box-shadow: none !important;
+                            line-height: inherit !important;
+                            text-decoration-line: underline !important;
+                            text-decoration-style: wavy !important;
+                            text-decoration-color: #f59e0b !important;
+                            text-decoration-thickness: 1px !important;
+                            text-underline-offset: 1px !important;
+                            text-decoration-skip-ink: none !important;
+                            text-decoration-skip: none !important;
+                        `;
+                    }
+                    
+                    hSpan.addEventListener('mouseenter', (e) => {
+                        console.log('🎯 悬停词:', m.item.word);
+                        showPdfVocabBubble(hSpan, m.item);
+                    });
+                    hSpan.addEventListener('mouseleave', () => hidePdfVocabBubble());
+                    
+                    frag.appendChild(hSpan);
+                    totalHighlights++;
+                    cursor = m.index + m.len;
+                });
+                
+                if (cursor < text.length) {
+                    frag.appendChild(document.createTextNode(text.slice(cursor)));
+                }
+                
+                // 替换原span内容
+                while (span.firstChild) {
+                    span.removeChild(span.firstChild);
+                }
+                span.appendChild(frag);
+                
+                // 调试：检查span是否真的被添加了
+                if (spanIdx < 2 && uniqueMatches.length > 0) {
+                    const highlightSpans = span.querySelectorAll('.pdf-vocab-highlight');
+                    if (highlightSpans.length > 0) {
+                        const color = window.getComputedStyle(highlightSpans[0])?.backgroundColor || 'unknown';
+                        console.log(`  ✓ [span${spanIdx}] 添加${highlightSpans.length}个高亮span到DOM，颜色: ${color}`);
+                    }
+                }
+            });
+            
+            console.log(`✅ 高亮完成: 处理${processedSpans}个span, 共找到${totalHighlights}处高亮`);
+        }
+        
+        /**
+         * 显示PDF词汇浮窗（鼠标悬停时）
+         * 样式和功能与文本阅读、字幕的浮窗一致
+         */
+        function showPdfVocabBubble(element, vocabItem) {
+            // 移除已存在的气泡
+            document.querySelectorAll('.pdf-vocab-bubble').forEach(b => b.remove());
+            
+            // 创建气泡容器
+            const bubble = document.createElement('div');
+            bubble.className = 'pdf-vocab-bubble';
+            
+            // 构建气泡内容
+            let bubbleHTML = `<div class="bubble-word">${vocabItem.word}</div>`;
+            if (vocabItem.meaning) {
+                bubbleHTML += `<div class="bubble-meaning">${vocabItem.meaning}</div>`;
+            }
+            if (vocabItem.note) {
+                bubbleHTML += `<div class="bubble-note"><strong>批注：</strong>${vocabItem.note}</div>`;
+            }
+            
+            bubble.innerHTML = bubbleHTML;
+            document.body.appendChild(bubble);
+            
+            // 定位气泡
+            const rect = element.getBoundingClientRect();
+            let left = rect.left + window.scrollX + rect.width / 2 - bubble.offsetWidth / 2;
+            let top = rect.top + window.scrollY - bubble.offsetHeight - 8;
+            
+            // 边界检查
+            const minLeft = 10;
+            const maxLeft = window.innerWidth - bubble.offsetWidth - 10;
+            left = Math.max(minLeft, Math.min(left, maxLeft));
+            
+            if (top < 10) {
+                top = rect.bottom + window.scrollY + 8;
+            }
+            
+            bubble.style.left = left + 'px';
+            bubble.style.top = top + 'px';
+            
+            // 气泡鼠标离开时处理
+            bubble.addEventListener('mouseleave', () => {
+                setTimeout(() => {
+                    if (!element.matches(':hover')) {
+                        bubble.remove();
+                    }
+                }, 100);
+            });
+        }
+        
+        /**
+         * 隐藏PDF词汇气泡
+         */
+        function hidePdfVocabBubble() {
+            setTimeout(() => {
+                const bubble = document.querySelector('.pdf-vocab-bubble');
+                if (bubble && !bubble.matches(':hover')) {
+                    bubble.remove();
+                }
+            }, 100);
+        }
+        
+        // 显示划词气泡
+        function showSelectionBubble() {
+            setTimeout(() => {
+                const selection = window.getSelection().toString().trim();
+                if (!selection || selection.length === 0) return;
+                
+                // 检查选择是否在PDF容器内
+                try {
+                    const range = window.getSelection().getRangeAt(0);
+                    if (!pagesContainer.contains(range.commonAncestorContainer)) return;
+                } catch (e) {
+                    return;
+                }
+                
+                // 移除已存在的气泡
+                document.querySelectorAll('.vocab-bubble').forEach(b => b.remove());
+                
+                // 查找生词本中的词汇
+                const vocabItem = vocabData.find(v => v.word.toLowerCase() === selection.toLowerCase());
+                
+                // 创建气泡
+                const bubble = document.createElement('div');
+                bubble.className = 'vocab-bubble';
+                bubble.innerHTML = `
+                    <div class="bubble-word">${selection}</div>
+                    ${vocabItem ? `<div class="bubble-meaning">${vocabItem.meaning || '未设置释义'}</div>` : ''}
+                    ${vocabItem && vocabItem.note ? `<div class="bubble-note">${vocabItem.note}</div>` : ''}
+                    <div class="bubble-buttons">
+                        <button class="bubble-note-btn">📝 添加</button>
+                    </div>
+                `;
+                
+                // 编辑按钮事件
+                const noteBtn = bubble.querySelector('.bubble-note-btn');
+                if (noteBtn) {
+                    noteBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        showBubbleEditMode(bubble, selection, vocabItem);
+                    };
+                }
+                
+                // 定位气泡
+                try {
+                    const rect = window.getSelection().getRangeAt(0).getBoundingClientRect();
+                    document.body.appendChild(bubble);
+                    
+                    let left = rect.left + window.scrollX + rect.width / 2 - bubble.offsetWidth / 2;
+                    let top = rect.top + window.scrollY - bubble.offsetHeight - 10;
+                    
+                    // 边界检查
+                    const minLeft = 10;
+                    const maxLeft = window.innerWidth - bubble.offsetWidth - 10;
+                    left = Math.max(minLeft, Math.min(left, maxLeft));
+                    
+                    if (top < 10) {
+                        top = rect.bottom + window.scrollY + 10;
+                    }
+                    
+                    bubble.style.left = left + 'px';
+                    bubble.style.top = top + 'px';
+                } catch (e) {
+                    console.error('❌ 气泡定位失败:', e);
+                    return;
+                }
+                
+                // 点击其他地方关闭气泡
+                const closeHandler = (e) => {
+                    if (e.target === bubble || bubble.contains(e.target)) return;
+                    bubble.remove();
+                    document.removeEventListener('click', closeHandler, true);
+                };
+                document.addEventListener('click', closeHandler, true);
+                
+            }, 50);
+        }
+        
+        async function renderAllPages() {
+            if (!pdf) return;
+            
+            pagesContainer.innerHTML = '';
+            const containerWidth = container.clientWidth - 32;
+            
+            // 只渲染前3页，其他页面延迟加载（快速打开）
+            const pagesToRenderNow = Math.min(3, numPages);
+            console.log(`📖 立即渲染前${pagesToRenderNow}页，共${numPages}页`);
+            
+            for (let pageNum = 1; pageNum <= pagesToRenderNow; pageNum++) {
+                try {
+                    const page = await pdf.getPage(pageNum);
+                    const baseViewport = page.getViewport({ scale: 1 });
+                    
+                    let scale;
+                    if (currentScale === 'auto' || currentScale === 'fit-width') {
+                        scale = containerWidth / baseViewport.width;
+                    } else if (currentScale === 'fit-page') {
+                        // 适应页面模式：确保至少显示一整页
+                        const containerHeight = container.clientHeight - 64; // 减去padding和间距
+                        const scaleX = containerWidth / baseViewport.width;
+                        const scaleY = containerHeight / baseViewport.height;
+                        scale = Math.min(scaleX, scaleY);
+                    } else {
+                        scale = parseFloat(currentScale);
+                    }
+                    
+                    const viewport = page.getViewport({ scale });
+                    
+                    // 创建页面容器
+                    const pageWrapper = document.createElement('div');
+                    pageWrapper.className = 'page-wrapper';
+                    pageWrapper.style.width = viewport.width + 'px';
+                    pageWrapper.style.height = viewport.height + 'px';
+                    pageWrapper.dataset.pageNumber = pageNum;
+                    
+                    // 页码标签
+                    const pageLabel = document.createElement('div');
+                    pageLabel.className = 'page-number';
+                    pageLabel.textContent = `第 ${pageNum} 页`;
+                    pageWrapper.appendChild(pageLabel);
+                    
+                    // Canvas层
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'page-canvas';
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    pageWrapper.appendChild(canvas);
+                    
+                    // 渲染PDF到Canvas
+                    const ctx = canvas.getContext('2d');
+                    await page.render({ canvasContext: ctx, viewport }).promise;
+                    
+                    // TextLayer
+                    const textLayer = document.createElement('div');
+                    textLayer.className = 'textLayer';
+                    textLayer.style.width = viewport.width + 'px';
+                    textLayer.style.height = viewport.height + 'px';
+                    textLayer.style.setProperty('--scale-factor', scale);
+                    pageWrapper.appendChild(textLayer);
+                    
+                    const textContent = await page.getTextContent();
+                    
+                    // 渲染文本层并等待完成
+                    const renderResult = pdfjsLib.renderTextLayer({
+                        textContentSource: textContent,
+                        container: textLayer,
+                        viewport,
+                        textDivs: []
+                    });
+                    
+                    // 等待renderTextLayer完成
+                    try {
+                        if (renderResult && renderResult.promise) {
+                            console.log(`⏳ 等待第${pageNum}页文本层渲染...`);
+                            await renderResult.promise;
+                            console.log(`✓ 第${pageNum}页文本层已渲染`);
+                        } else {
+                            // 如果没有promise，延迟一下让DOM更新
+                            console.log(`⏳ 第${pageNum}页无promise，等待50ms...`);
+                            await new Promise(resolve => setTimeout(resolve, 50));
+                            console.log(`✓ 第${pageNum}页延迟完成`);
+                        }
+                    } catch (e) {
+                        console.error(`⚠️ 第${pageNum}页文本层等待出错:`, e);
+                    }
+                    
+                    // 现在可以安全地进行高亮
+                    highlightVocabInPdfTextLayer(textLayer);
+                    
+                    // 为TextLayer添加划词事件
+                    textLayer.addEventListener('mouseup', showSelectionBubble);
+                    
+                    // AnnotationLayer（预留）
+                    const annotationLayer = document.createElement('div');
+                    annotationLayer.className = 'annotationLayer';
+                    pageWrapper.appendChild(annotationLayer);
+                    
+                    pagesContainer.appendChild(pageWrapper);
+                    
+                    console.log(`✅ 第${pageNum}页渲染完成`);
+                    
+                } catch (e) {
+                    console.error(`❌ 第${pageNum}页渲染失败:`, e);
+                }
+            }
+            
+            // 延迟加载剩余页面（在后台异步加载，不阻塞UI）
+            if (pagesToRenderNow < numPages) {
+                console.log(`⏳ 将在后台加载第${pagesToRenderNow + 1}-${numPages}页`);
+                setTimeout(() => {
+                    renderRemainingPages(pagesToRenderNow + 1);
+                }, 1000);  // 从500ms增加到1000ms
+            }
+            
+            updateCurrentPage();
+        }
+        
+        /**
+         * 后台加载剩余页面（不阻塞主线程）
+         */
+        async function renderRemainingPages(startPage) {
+            if (startPage > numPages) return;
+            
+            const containerWidth = container.clientWidth - 32;
+            const batchSize = 2;  // 每批次加载2页，降低CPU占用
+            
+            console.log(`📚 后台开始加载，起始页:${startPage}`);
+            
+            for (let pageNum = startPage; pageNum <= numPages; pageNum++) {
+                try {
+                    // 检查页面是否已存在
+                    if (document.querySelector(`[data-page-number="${pageNum}"]`)) {
+                        continue;
+                    }
+                    
+                    const page = await pdf.getPage(pageNum);
+                    const baseViewport = page.getViewport({ scale: 1 });
+                    
+                    let scale;
+                    if (currentScale === 'auto' || currentScale === 'fit-width') {
+                        scale = containerWidth / baseViewport.width;
+                    } else if (currentScale === 'fit-page') {
+                        const containerHeight = container.clientHeight - 64;
+                        const scaleX = containerWidth / baseViewport.width;
+                        const scaleY = containerHeight / baseViewport.height;
+                        scale = Math.min(scaleX, scaleY);
+                    } else {
+                        scale = parseFloat(currentScale);
+                    }
+                    
+                    const viewport = page.getViewport({ scale });
+                    
+                    const pageWrapper = document.createElement('div');
+                    pageWrapper.className = 'page-wrapper';
+                    pageWrapper.style.width = viewport.width + 'px';
+                    pageWrapper.style.height = viewport.height + 'px';
+                    pageWrapper.dataset.pageNumber = pageNum;
+                    
+                    const pageLabel = document.createElement('div');
+                    pageLabel.className = 'page-number';
+                    pageLabel.textContent = `第 ${pageNum} 页`;
+                    pageWrapper.appendChild(pageLabel);
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'page-canvas';
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    pageWrapper.appendChild(canvas);
+                    
+                    const ctx = canvas.getContext('2d');
+                    await page.render({ canvasContext: ctx, viewport }).promise;
+                    
+                    const textLayer = document.createElement('div');
+                    textLayer.className = 'textLayer';
+                    textLayer.style.width = viewport.width + 'px';
+                    textLayer.style.height = viewport.height + 'px';
+                    textLayer.style.setProperty('--scale-factor', scale);
+                    pageWrapper.appendChild(textLayer);
+                    
+                    const textContent = await page.getTextContent();
+                    const renderResult = pdfjsLib.renderTextLayer({
+                        textContentSource: textContent,
+                        container: textLayer,
+                        viewport,
+                        textDivs: []
+                    });
+                    
+                    if (renderResult && renderResult.promise) {
+                        await renderResult.promise;
+                    }
+                    
+                    highlightVocabInPdfTextLayer(textLayer);
+                    textLayer.addEventListener('mouseup', showSelectionBubble);
+                    
+                    const annotationLayer = document.createElement('div');
+                    annotationLayer.className = 'annotationLayer';
+                    pageWrapper.appendChild(annotationLayer);
+                    
+                    pagesContainer.appendChild(pageWrapper);
+                    
+                    // 每加载N页，暂停一下让浏览器有机会处理其他任务
+                    if ((pageNum - startPage + 1) % batchSize === 0) {
+                        console.log(`✅ 后台已加载到第${pageNum}页，暂停中...`);
+                        await new Promise(resolve => setTimeout(resolve, 200));  // 从100ms增加到200ms
+                    }
+                    
+                } catch (e) {
+                    console.error(`❌ 后台加载第${pageNum}页失败:`, e);
+                }
+            }
+            
+            console.log(`✅ 所有${numPages}页都已加载完成`);
+        }
+        
+        function updateCurrentPage() {
+            const scrollTop = container.scrollTop + container.clientHeight / 2;
+            const pages = pagesContainer.querySelectorAll('.page-wrapper');
+            
+            for (let i = 0; i < pages.length; i++) {
+                const page = pages[i];
+                const rect = page.getBoundingClientRect();
+                const containerRect = container.getBoundingClientRect();
+                const pageTop = rect.top - containerRect.top + container.scrollTop;
+                const pageBottom = pageTop + rect.height;
+                
+                if (scrollTop >= pageTop && scrollTop < pageBottom) {
+                    document.getElementById('current-page-display').textContent = `页 ${i + 1}`;
+                    break;
+                }
+            }
+        }
+        
+        /**
+         * 滚动到指定页码（带重试机制应对异步渲染）
+         */
+        function scrollToPage(pageNum, retryCount = 0) {
+            const pageWrapper = document.querySelector(`[data-page-number="${pageNum}"]`);
+            
+            if (pageWrapper) {
+                // 页面已渲染，滚动到该页
+                const containerRect = container.getBoundingClientRect();
+                const pageRect = pageWrapper.getBoundingClientRect();
+                const scrollOffset = pageRect.top - containerRect.top + container.scrollTop;
+                
+                container.scrollTop = scrollOffset;
+                console.log(`✅ 已滚动到第${pageNum}页`);
+                updateCurrentPage();
+            } else if (retryCount < 10) {
+                // 页面还未渲染，等待后重试
+                console.log(`⏳ 第${pageNum}页还未渲染，${retryCount + 1}秒后重试...`);
+                setTimeout(() => {
+                    scrollToPage(pageNum, retryCount + 1);
+                }, 200);
+            } else {
+                console.warn(`⚠️ 无法滚动到第${pageNum}页，页面可能还未加载`);
+            }
+        }
+        
+        async function loadPDF() {
+            document.getElementById('loading').style.display = 'flex';
+            
+            // 先加载生词本数据和PDF缓存
+            await loadVocabData();
+            const cache = await loadPdfCache();
+            const pdfProgress = await loadPdfReadingProgress();
+            
+            try {
+                console.log('⏳ 开始加载PDF...');
+                const fetchResponse = await fetch(pdfUrl);
+                
+                if (!fetchResponse.ok) {
+                    throw new Error(`HTTP ${fetchResponse.status}: ${fetchResponse.statusText}`);
+                }
+                
+                const arrayBuffer = await fetchResponse.arrayBuffer();
+                console.log('✓ PDF已下载，大小:', arrayBuffer.byteLength, 'bytes');
+                
+                const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+                pdf = await loadingTask.promise;
+                numPages = pdf.numPages;
+                
+                document.getElementById('total-pages').textContent = numPages;
+                console.log('✅ PDF加载成功，共', numPages, '页');
+                
+                // 1. 首先应用缓存状态（缩放、UI状态等）
+                await applyCacheState(cache);
+                
+                // 2. 然后渲染所有页面
+                console.log('⏳ 开始渲染所有页面...');
+                await renderAllPages();
+                console.log('✅ 所有页面渲染完成');
+                
+                // 3. 最后恢复阅读进度（必须在页面渲染完成后）
+                // 使用页码定位，比scrollTop更可靠
+                if (pdfProgress && pdfProgress.currentPage) {
+                    const targetPage = pdfProgress.currentPage;
+                    console.log('📖 恢复阅读进度: 第', targetPage, '页，进度', (pdfProgress.pagePercent || 0).toFixed(1) + '%');
+                    
+                    // 使用requestAnimationFrame确保DOM已更新
+                    requestAnimationFrame(() => {
+                        scrollToPage(targetPage);
+                    });
+                } else {
+                    console.log('📖 新开始，从第1页开始');
+                    container.scrollTop = 0;
+                }
+                
+                // 4. 统计PDF中的字数（延迟较长时间，等待后台页面也渲染完成）
+                setTimeout(() => {
+                    countPdfWords();
+                }, 5000);  // 从2秒增加到5秒
+                
+                // 5. 周期性更新字数统计，直到稳定
+                let retryCount = 0;
+                const retryInterval = setInterval(() => {
+                    const result = countPdfWords();
+                    retryCount++;
+                    if (retryCount >= 3 || (result.words > 0 && result.chars > 0)) {  // 从5次减少到3次
+                        clearInterval(retryInterval);
+                        console.log('✅ 字数统计完成');
+                    }
+                }, 5000);  // 从3秒增加到5秒
+                
+                document.getElementById('loading').style.display = 'none';
+                
+            } catch (e) {
+                document.getElementById('loading').style.display = 'none';
+                console.error('❌ PDF加载失败:', e);
+                document.getElementById('error').textContent = '加载失败: ' + e.message;
+                document.getElementById('error').style.display = 'block';
+            }
+        }
+        
+        // ============================================================================
+        // PDF进度和字数统计保存
+        // ============================================================================
+        let pdfDocId = getPdfCacheName();  // 使用文件名作为文档ID
+        let pdfProgressTimeout = null;
+        let pdfCharCount = 0;  // PDF总字符数
+        let pdfWordCount = 0;  // PDF总词数
+        
+        /**
+         * 统计PDF中的字符和词数
+         * 规则：中文按字符计，其他语言按空格分割计词
+         */
+        function countPdfWords() {
+            let totalChars = 0;
+            let totalWords = 0;
+            // 只统计已渲染的文本层中的有效文本节点（span或div）
+            const textDivs = document.querySelectorAll('.textLayer span, .textLayer div');
+            
+            let validNodeCount = 0;
+            textDivs.forEach(div => {
+                const text = (div.textContent || '').trim();
+                if (!text) return; // 跳过空白节点
+                
+                validNodeCount++;
+                
+                // 统计中文字符
+                const chineseMatches = text.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || [];
+                totalChars += chineseMatches.length;
+                
+                // 统计其他语言词（空格分割）
+                const otherText = text.replace(/[\u4e00-\u9fff\u3400-\u4dbf]/g, '').trim();
+                if (otherText) {
+                    const words = otherText.split(/\s+/).filter(w => w.length > 0);
+                    totalWords += words.length;
+                }
+            });
+            
+            pdfCharCount = totalChars;
+            pdfWordCount = totalWords;
+            console.log(`📊 PDF字数统计: 中文${totalChars}字, 其他${totalWords}词 (有效节点${validNodeCount}个)`);
+            return { chars: totalChars, words: totalWords };
+        }
+        
+        /**
+         * 保存PDF阅读进度到后端
+         */
+        async function savePdfReadingProgress() {
+            try {
+                const currentPage = parseInt(document.getElementById('current-page-display').textContent.match(/\d+/)?.[0] || 1);
+                const scrollPercent = container.scrollHeight > 0 ? (container.scrollTop / (container.scrollHeight - container.clientHeight)) * 100 : 0;
+                
+                // 以页码为主要进度依据（当前页算作已读）
+                const pagePercent = numPages > 0 ? (currentPage / numPages) * 100 : 0;
+                
+                const progressData = {
+                    docId: pdfDocId,
+                    docType: 'pdf',
+                    scrollPosition: container.scrollTop,
+                    scrollPercent: Math.min(100, Math.max(0, scrollPercent)),
+                    pagePercent: Math.min(100, Math.max(0, pagePercent)),
+                    currentPage: currentPage,
+                    totalPages: numPages,
+                    scale: currentScale,
+                    totalChars: pdfCharCount,
+                    totalWords: pdfWordCount
+                };
+                
+                const response = await fetch('/api/doc-progress/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(progressData)
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    console.log('💾 PDF进度已保存');
+                    
+                    // 通知父窗口更新进度显示
+                    try {
+                        window.parent.postMessage({
+                            type: 'pdfProgressUpdate',
+                            progress: {
+                                scrollPercent: progressData.scrollPercent,
+                                pagePercent: progressData.pagePercent,
+                                scrollPosition: progressData.scrollPosition,
+                                totalChars: progressData.totalChars,
+                                totalWords: progressData.totalWords
+                            }
+                        }, '*');
+                    } catch (e) {
+                        console.warn('无法通知父窗口:', e);
+                    }
+                }
+            } catch (e) {
+                console.warn('⚠️ 保存PDF进度失败:', e);
+            }
+        }
+        
+        /**
+         * 防抖保存PDF进度
+         */
+        function debouncedSavePdfProgress() {
+            if (pdfProgressTimeout) {
+                clearTimeout(pdfProgressTimeout);
+            }
+            pdfProgressTimeout = setTimeout(() => {
+                savePdfReadingProgress();
+            }, 1500);
+        }
+        
+        /**
+         * 加载PDF阅读进度
+         */
+        async function loadPdfReadingProgress() {
+            try {
+                const response = await fetch('/api/doc-progress/load', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ docId: pdfDocId })
+                });
+                
+                const result = await response.json();
+                if (result.found && result.progress) {
+                    console.log('✅ 加载PDF进度成功');
+                    return result.progress;
+                }
+            } catch (e) {
+                console.warn('⚠️ 加载PDF进度失败:', e);
+            }
+            return null;
+        }
+        
+        // 事件监听
+        container.addEventListener('scroll', () => {
+            updateCurrentPage();
+            // 防抖保存缓存（每1秒保存一次）
+            debouncedSavePdfCache();
+            // 防抖保存进度（每1.5秒保存一次）
+            debouncedSavePdfProgress();
+        });
+        
+        // 页面卸载时立即保存进度
+        window.addEventListener('beforeunload', () => {
+            savePdfReadingProgress();
+        });
+        
+        document.getElementById('zoom-out').onclick = async () => {
+            const s = document.getElementById('scale');
+            const val = s.value === 'auto' ? 100 : Math.max(50, parseInt(s.value) - 10);
+            s.value = val;
+            currentScale = val / 100;
+            document.getElementById('scale-label').textContent = '%';
+            await renderAllPages();
+            savePdfCache();  // 缩放改变时保存缓存
+        };
+        
+        document.getElementById('zoom-in').onclick = async () => {
+            const s = document.getElementById('scale');
+            const val = s.value === 'auto' ? 120 : Math.min(300, parseInt(s.value) + 10);
+            s.value = val;
+            currentScale = val / 100;
+            document.getElementById('scale-label').textContent = '%';
+            await renderAllPages();
+            savePdfCache();  // 缩放改变时保存缓存
+        };
+        
+        document.getElementById('fit-width').onclick = async () => {
+            document.getElementById('scale').value = 'auto';
+            currentScale = 'fit-width';
+            document.getElementById('scale-label').textContent = '(适应宽度)';
+            await renderAllPages();
+            savePdfCache();  // 缩放模式改变时保存缓存
+        };
+        
+        document.getElementById('fit-page').onclick = async () => {
+            document.getElementById('scale').value = 'auto';
+            currentScale = 'fit-page';
+            document.getElementById('scale-label').textContent = '(适应页面)';
+            await renderAllPages();
+            savePdfCache();  // 缩放模式改变时保存缓存
+        };
+        
+        document.getElementById('scale').onchange = async () => {
+            const val = document.getElementById('scale').value;
+            if (val === 'auto') {
+                currentScale = 'fit-width';
+                document.getElementById('scale-label').textContent = '(适应宽度)';
+            } else {
+                currentScale = parseInt(val) / 100;
+                document.getElementById('scale-label').textContent = '%';
+            }
+            await renderAllPages();
+            savePdfCache();  // 缩放改变时保存缓存
+        };
+        
+        // 键盘导航
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'PageDown' || e.key === 'ArrowDown') {
+                container.scrollBy(0, container.clientHeight * 0.9);
+                e.preventDefault();
+            } else if (e.key === 'PageUp' || e.key === 'ArrowUp') {
+                container.scrollBy(0, -container.clientHeight * 0.9);
+                e.preventDefault();
+            }
+        });
+        
+        loadPDF();
+    </script>
+</body>
+</html>

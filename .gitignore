@@ -1,0 +1,55 @@
+# .gitignore - 俄语学习项目
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# Whisper 模型文件（体积大，不上传到 git）
+models/*.pt
+
+# 配置文件（可能包含敏感信息）
+config/.env
+config/*.txt
+
+# 临时文件
+*.tmp
+*.log
+*.wav
+*.mp3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 用户数据
+user_data/
+uploads/
+user_data/pdf_cache/
+user_data/media/
+user_data/playlists/
+user_data/readings/
+user_data/settings/
+user_data/subtitles/
+user_data/vocab/
+static/reading_images/
+*.progress.json

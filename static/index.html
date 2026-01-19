@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>语言学习实验室</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>语言学习实验室</h1>
+    <nav class="mode-nav">
+      <button id="mode-listening" class="mode-btn active" data-mode="listening">👂 听力训练</button>
+      <button id="mode-reading" class="mode-btn" data-mode="reading">📖 阅读学习</button>
+    </nav>
+    <div class="header-right">
+      <button id="btn-settings-header" class="header-btn" title="设置">⚙️</button>
+    </div>
+  </header>
+
+  <main class="app-layout">
+    <!-- 听力模块 -->
+    <div id="listening-module" class="listening-module">
+      <!-- Progress indicator -->
+      <div id="progress-container" class="progress-container" style="display: none;">
+        <div class="progress-wrapper">
+          <div class="progress-bar-wrapper">
+            <div class="progress-bar">
+              <div id="progress-fill" class="progress-fill"></div>
+              <span id="progress-percent" class="progress-percent">0%</span>
+            </div>
+          </div>
+          <div id="progress-text" class="progress-text">处理中...</div>
+          <button id="progress-cancel-btn" class="progress-cancel-btn" onclick="cancelProgress()" title="取消当前操作">✕</button>
+        </div>
+      </div>
+
+      <!-- 左侧区域：播放器、字幕列表、编辑 -->
+      <aside class="main-panel">
+        <!-- 播放器区 -->
+      <section class="playback-section">
+        <div class="section-header">
+          <div class="section-title">📽️ 播放器 · <span id="current-media-name">未选择</span></div>
+          <button class="collapse-btn" data-target="playback-body" aria-label="折叠/展开播放器">▾</button>
+        </div>
+        <div id="playback-body" class="collapsible-body">
+          <video id="player" controls></video>
+          <!-- 音频波形进度条 -->
+          <div class="waveform-header">
+            <span class="waveform-title">🎵 音频波形与字幕区域</span>
+            <div class="waveform-controls">
+              <input id="wave-time-input" type="text" class="time-input" placeholder="00:00:00.000" title="精确时间跳转 (时:分:秒.毫秒)">
+              <button id="btn-wave-time-go" class="mini-btn" title="跳转到指定时间">跳转</button>
+              <span class="separator">|</span>
+              <button id="btn-wave-zoom-out" class="mini-btn" title="缩小（-5%）">−</button>
+              <input id="wave-zoom-percent" type="number" class="zoom-input" value="100" min="100" max="2000" step="5" title="缩放百分比">
+              <span class="zoom-label">%</span>
+              <button id="btn-wave-zoom-in" class="mini-btn" title="放大（+5%）">+</button>
+              <button id="btn-wave-zoom-reset" class="mini-btn" title="重置到100%">重置</button>
+            </div>
+          </div>
+          <div id="player-waveform" class="player-waveform">
+            <!-- WaveSurfer 内置光标已足够 -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 字幕列表区 -->
+      <section class="subtitle-section">
+        <div class="section-header">
+          <div class="section-title">📄 字幕列表</div>
+          <button class="collapse-btn" data-target="subtitle-list-wrapper" aria-label="折叠/展开字幕列表">▾</button>
+          <div class="header-actions">
+            <label class="badge" for="subtitle-upload" title="导入字幕">📥 导入</label>
+            <input type="file" id="subtitle-upload" accept=".json,.srt,.txt" style="display:none;" />
+            <button id="btn-sub-delete" class="mini-btn danger-text" title="删除选中的字幕">🗑️ 删除</button>
+            <button id="btn-sub-clear" class="mini-btn danger-text" title="清空字幕列表">🧹 清空</button>
+          </div>
+        </div>
+        <div id="subtitle-list-wrapper" class="collapsible-body">
+          <div id="subtitle-list"></div>
+        </div>
+      </section>
+
+      <!-- 字幕编辑区 -->
+      <section class="editor-section">
+        <div class="section-header">
+          <div class="section-title">✏️ 字幕编辑</div>
+          <button class="collapse-btn" data-target="editor-body" aria-label="折叠/展开字幕编辑">▾</button>
+          <div class="header-actions">
+            <button id="btn-export" class="mini-btn" title="导出 JSON">📤 JSON</button>
+            <button id="btn-export-srt" class="mini-btn" title="导出 SRT">📤 SRT</button>
+          </div>
+        </div>
+        <div id="editor-body" class="collapsible-body">
+          <div class="editors">
+            <div>
+              <div class="badge">原文</div>
+              <textarea id="edit-en" placeholder="生成的内容"></textarea>
+            </div>
+            <div>
+              <div class="badge">翻译</div>
+              <textarea id="edit-zh" placeholder="中文翻译"></textarea>
+            </div>
+          </div>
+          <div style="margin-top: 10px;">
+            <div class="badge">学习备注</div>
+            <textarea id="edit-note" class="editor-note" placeholder="语法、词汇、发音要点"></textarea>
+          </div>
+          <div class="editor-actions generation-row">
+            <button id="btn-auto-sub" class="primary" title="自动生成字幕">🎯 自动生成</button>
+            <button id="btn-manual-timing" class="primary" title="手动打轴（按行标记时间）">⏱️ 手动打轴</button>
+            <button id="btn-split-sub" class="primary" title="分句">✂️ 分句</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <!-- 右侧区域：工具和学习 -->
+    <aside class="tool-panel">
+      <!-- 控制区 -->
+      <section class="control-section">
+        <div class="section-header">
+          <div class="section-title">⚙️ 播放控制</div>
+          <button class="collapse-btn" data-target="control-body" aria-label="折叠/展开播放控制">▾</button>
+        </div>
+        <div id="control-body" class="collapsible-body">
+          <div class="control-grid">
+            <button id="btn-prev-sen" class="small-btn">⬅️ 上句</button>
+            <button id="btn-next-sen" class="small-btn">下句 ➡️</button>
+            <button id="toggle-loop" class="small-btn" title="单句循环">🔁 循环</button>
+            <button id="toggle-auto-pause" class="small-btn" title="自动暂停">⏸️ 自动暂停</button>
+            <button id="toggle-auto-play" class="small-btn" title="自动播放">▶️ 自动播放</button>
+            <button id="btn-listen-mode" class="small-btn" title="精听训练">👂 精听</button>
+          </div>
+          <div class="loop-control" id="loop-control" style="display: none;">
+            <label style="font-size: 11px; color: var(--muted);">循环次数</label>
+            <select id="loop-count" class="small-select">
+              <option value="1">1次</option>
+              <option value="2" selected>2次</option>
+              <option value="3">3次</option>
+              <option value="5">5次</option>
+              <option value="-1">无限循环</option>
+            </select>
+            <label style="font-size: 11px; color: var(--muted); margin-top: 8px;">循环间隔</label>
+            <select id="loop-pause" class="small-select">
+              <option value="0">无间隔</option>
+              <option value="0.1">1/10 句长</option>
+              <option value="0.2" selected>1/5 句长</option>
+              <option value="0.33">1/3 句长</option>
+              <option value="0.5">1/2 句长</option>
+            </select>
+          </div>
+          <div class="status-bar">
+            <div id="loop-status" style="color: var(--muted); font-size: 11px;">🔁 循环: 关</div>
+            <div id="loop-pause-status" style="color: var(--muted); font-size: 11px;">⏱️ 间隔: 20%句长</div>
+            <div id="auto-pause-status" style="color: var(--muted); font-size: 11px;">⏸️ 自动暂停: 关</div>
+            <div id="auto-play-status" style="color: var(--muted); font-size: 11px;">▶️ 自动播放: 开</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 播放列表区（移至右侧，可折叠） -->
+      <section class="playlist-section">
+        <div class="section-header">
+          <div class="section-title">📋 播放列表</div>
+          <button class="collapse-btn" data-target="playlist-body" aria-label="折叠/展开播放列表">▾</button>
+          <div class="header-actions">
+            <label for="audio-upload" class="badge success-text" title="批量添加文件">📁 添加</label>
+            <input type="file" id="audio-upload" accept="audio/*,video/*" multiple style="display:none;" />
+            <button id="btn-clear-playlist" class="mini-btn danger-text" title="清空列表">🗑️ 清空</button>
+          </div>
+        </div>
+        <div id="playlist-body" class="collapsible-body">
+          <div id="playlist-selector"></div>
+          <div id="playlist" class="playlist"></div>
+        </div>
+      </section>
+
+      <!-- 跟读区 -->
+      <section class="recording-section">
+        <div class="section-header">
+          <div class="section-title">🎤 跟读录音</div>
+          <button class="collapse-btn" data-target="recording-body" aria-label="折叠/展开录音">▾</button>
+          <div class="header-actions">
+            <button id="btn-clear-record" class="mini-btn danger-text" title="删除录音">🗑️ 删除</button>
+          </div>
+        </div>
+        <div id="recording-body" class="collapsible-body">
+          <div class="recording-controls">
+            <button id="btn-record-toggle" class="primary">⏺️ 开始录音</button>
+          </div>
+          <audio id="record-audio" controls style="width:100%; margin-top:8px;"></audio>
+        </div>
+      </section>
+
+      <!-- 生词本区 -->
+      <section class="vocab-section">
+        <div class="section-header">
+          <div class="section-title">📚 生词本</div>
+          <button class="collapse-btn" data-target="vocab-body" aria-label="折叠/展开生词本">▾</button>
+          <div class="header-actions">
+            <button id="btn-vocab-export" class="mini-btn" title="导出生词本">📤 导出</button>
+            <label for="vocab-import" class="badge" title="导入生词本">📥 导入</label>
+            <input id="vocab-import" type="file" accept=".json" style="display:none;" />
+          </div>
+        </div>
+        <div id="vocab-body" class="collapsible-body">
+          <!-- 生词本选择器 -->
+          <div class="vocabbook-selector-wrapper">
+            <select id="vocabbook-selector" class="vocabbook-select" title="选择生词本"></select>
+            <button id="btn-vocabbook-new" class="icon-btn" title="新建生词本">➕</button>
+            <button id="btn-vocabbook-rename" class="icon-btn" title="重命名生词本">✏️</button>
+            <button id="btn-vocabbook-delete" class="icon-btn" title="删除生词本">🗑️</button>
+          </div>
+          <div id="vocab-list"></div>
+        </div>
+      </section>
+
+      <!-- 设置区 -->
+      <section class="settings-section-bottom" style="display: none;">
+        <button id="btn-settings" class="full-width">⚙️ 设置与数据</button>
+      </section>
+    </aside>
+    </div>
+
+    <!-- 阅读模块 -->
+    <div id="reading-module" class="reading-module" style="display: none;">
+      <!-- 进度指示器 -->
+      <div id="reading-progress-container" class="progress-container" style="display: none;">
+        <div class="progress-wrapper">
+          <div class="progress-bar-wrapper">
+            <div class="progress-bar">
+              <div id="reading-progress-fill" class="progress-fill"></div>
+              <span id="reading-progress-percent" class="progress-percent">0%</span>
+            </div>
+          </div>
+          <div id="reading-progress-text" class="progress-text">处理中...</div>
+          <button id="reading-progress-cancel-btn" class="progress-cancel-btn" onclick="cancelReadingProgress()" title="取消操作">✕</button>
+        </div>
+      </div>
+
+      <!-- 左侧：文本阅读区域 -->
+      <aside class="reading-main-panel">
+        <!-- 文本展示区 -->
+        <section class="reading-text-section">
+          <div class="section-header">
+            <div class="section-title">📖 阅读内容 · <span id="reading-current-file">未选择</span></div>
+            <button class="collapse-btn" data-target="reading-text-body" aria-label="折叠/展开阅读内容">▾</button>
+            <div class="header-actions">
+              <input type="text" id="reading-search-box" class="search-box" placeholder="🔍 搜索文本...">
+            </div>
+          </div>
+          <div id="reading-text-body" class="collapsible-body">
+            <div id="reading-content" class="reading-content">
+              <p style="color: var(--muted); text-align: center; padding: 20px;">请从右侧文档列表中选择或导入文档开始阅读</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- 阅读进度 -->
+        <section class="reading-nav-section">
+          <div class="section-header">
+            <div class="section-title">📊 阅读进度</div>
+            <button class="collapse-btn" data-target="reading-nav-body" aria-label="折叠/展开进度">▾</button>
+          </div>
+          <div id="reading-nav-body" class="collapsible-body">
+            <div class="progress-info">
+              <div class="progress-bar">
+                <div id="reading-scroll-progress" class="progress-fill" style="width: 0%;"></div>
+              </div>
+              <div id="reading-progress-text-info" style="text-align: center; font-size: 12px; color: var(--muted); margin-top: 8px;">
+                已阅读：<span id="reading-percent">0</span>%
+              </div>
+              <div style="text-align: center; font-size: 11px; color: var(--muted); margin-top: 4px;">
+                <span id="reading-chars-read">0</span> / <span id="reading-total-chars">0</span> 字 · <span id="reading-total-words">0</span> 词
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 笔记区 -->
+        <section class="reading-notes-section">
+          <div class="section-header">
+            <div class="section-title">📝 笔记与标注</div>
+            <button class="collapse-btn" data-target="reading-notes-body" aria-label="折叠/展开笔记">▾</button>
+            <div class="header-actions">
+              <button id="btn-reading-export-notes" class="mini-btn" title="导出笔记">📤 导出</button>
+            </div>
+          </div>
+          <div id="reading-notes-body" class="collapsible-body">
+            <div id="reading-notes-list" class="notes-list"></div>
+            <textarea id="reading-current-note" class="note-editor" placeholder="选中文字后可以添加笔记..."></textarea>
+            <button id="btn-reading-add-note" class="primary" style="width: 100%; margin-top: 8px;">💾 保存笔记</button>
+          </div>
+        </section>
+      </aside>
+
+      <!-- 右侧：文档列表和工具 -->
+      <aside class="reading-tool-panel">
+        <!-- 文档列表 -->
+        <section class="reading-documents-section">
+          <div class="section-header">
+            <div class="section-title">📚 文档列表</div>
+            <button class="collapse-btn" data-target="reading-documents-body" aria-label="折叠/展开文档列表">▾</button>
+            <div class="header-actions">
+              <label for="reading-file-upload" class="badge success-text" title="导入文档">📁 添加</label>
+              <input type="file" id="reading-file-upload" accept=".pdf,.epub,.txt,.doc,.docx,.md" multiple style="display:none;" />
+              <button id="btn-reading-clear-documents" class="mini-btn danger-text" title="清空列表">🗑️ 清空</button>
+            </div>
+          </div>
+          <div id="reading-documents-body" class="collapsible-body" style="border: 2px dashed var(--border); border-radius: 6px; transition: all 0.2s ease;">
+            <div id="reading-documents-list" class="playlist"></div>
+          </div>
+        </section>
+
+        <!-- 生词本（共享） -->
+        <section class="vocab-section">
+          <div class="section-header">
+            <div class="section-title">📚 生词本</div>
+            <button class="collapse-btn" data-target="reading-vocab-body" aria-label="折叠/展开生词本">▾</button>
+            <div class="header-actions">
+              <button id="btn-reading-vocab-export" class="mini-btn" title="导出生词本">📤 导出</button>
+              <label for="reading-vocab-import" class="badge" title="导入生词本">📥 导入</label>
+              <input id="reading-vocab-import" type="file" accept=".json" style="display:none;" />
+            </div>
+          </div>
+          <div id="reading-vocab-body" class="collapsible-body">
+            <div class="vocabbook-selector-wrapper">
+              <select id="reading-vocabbook-selector" class="vocabbook-select" title="选择生词本"></select>
+              <button id="btn-reading-vocabbook-new" class="icon-btn" title="新建生词本">➕</button>
+              <button id="btn-reading-vocabbook-rename" class="icon-btn" title="重命名生词本">✏️</button>
+              <button id="btn-reading-vocabbook-delete" class="icon-btn" title="删除生词本">🗑️</button>
+            </div>
+            <div id="reading-vocab-list" class="vocab-list"></div>
+          </div>
+        </section>
+
+        <!-- 文本分析 -->
+        <section class="reading-analysis-section">
+          <div class="section-header">
+            <div class="section-title">📈 文本分析</div>
+            <button class="collapse-btn" data-target="reading-analysis-body" aria-label="折叠/展开分析">▾</button>
+          </div>
+          <div id="reading-analysis-body" class="collapsible-body">
+            <div class="analysis-stats">
+              <div class="stat-item">
+                <span class="stat-label">总字数：</span>
+                <span id="reading-char-count" class="stat-value">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">生词数：</span>
+                <span id="reading-new-word-count" class="stat-value">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">重复率：</span>
+                <span id="reading-repeat-rate" class="stat-value">0%</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <!-- 设置面板 Modal -->
+  <div id="settings-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>⚙️ 设置</h2>
+        <button id="btn-close-settings" class="close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-section">
+          <h3>生词本设置</h3>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin: 12px 0; padding: 8px 0; border-bottom: 1px solid var(--border);">
+            <span>听力和阅读使用通用默认生词本</span>
+            <label id="toggle-common-vocab" class="toggle-switch" style="position: relative; display: inline-block; width: 54px; height: 32px; vertical-align: middle;">
+              <input type="checkbox" id="checkbox-common-vocab" style="display: none;">
+              <span class="slider" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 54px; height: 32px; background-color: #999; cursor: pointer; border-radius: 32px; transition: background-color 0.3s ease;">
+                <span style="content: ''; position: absolute; width: 28px; height: 28px; border-radius: 50%; background-color: white; top: 2px; left: 2px; transition: left 0.3s ease; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);"></span>
+              </span>
+            </label>
+          </div>
+          <p style="margin-top: 8px; color: var(--muted); font-size: 12px;">启用后，两个模块共享同一个默认生词本。自定义生词本始终共享。</p>
+        </div>
+        <div class="settings-section">
+          <h3>模型与推理</h3>
+          <div id="model-settings" class="settings-grid"></div>
+        </div>
+        <div class="settings-section">
+          <h3>折叠偏好</h3>
+          <p style="margin-top: 4px; color: var(--muted); font-size: 12px;">启用滑块将在下次加载时保持该区域折叠。</p>
+          <div style="margin-top: 12px; font-weight: bold; color: var(--text); margin-bottom: 8px;">听力训练</div>
+          <div id="collapse-settings" class="settings-grid"></div>
+          <div style="margin-top: 16px; font-weight: bold; color: var(--text); margin-bottom: 8px;">阅读学习</div>
+          <div id="collapse-settings-reading" class="settings-grid"></div>
+        </div>
+        <div class="settings-section">
+          <h3>缓存管理</h3>
+          <p>你的所有数据都保存在浏览器本地存储和服务器中，包括：</p>
+          <ul>
+            <li>字幕编辑历史（用户版本、翻译、备注）</li>
+            <li>生词本</li>
+            <li>播放列表</li>
+            <li>阅读文档</li>
+            <li>应用设置</li>
+          </ul>
+          <div id="cache-info" style="margin-top: 12px; font-size: 12px; color: var(--muted); line-height: 1.6;"></div>
+          <div style="display: flex; gap: 8px; margin-top: 12px;">
+            <button id="btn-export-all" class="primary">📥 导出所有数据</button>
+            <button id="btn-clear-cache" class="danger">🗑️ 清除所有缓存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 手动打轴 Modal -->
+  <div id="timing-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>⏱️ 手动打轴</h2>
+        <button id="btn-close-timing" class="close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-section">
+          <h3>导入文本（每行一条）</h3>
+          <textarea id="timing-text" style="width: 100%; height: 160px;" placeholder="在此粘贴文本，每行代表一条字幕"></textarea>
+          <div style="margin-top: 8px; display: flex; gap: 8px; align-items: center;">
+            <input id="timing-file" type="file" accept=".txt" />
+            <button id="btn-timing-load" class="mini-btn">载入文本</button>
+            <button id="btn-timing-load-subs" class="mini-btn">读取当前字幕文本</button>
+            <span id="timing-lines-count" style="color: var(--muted); font-size: 12px;">0 行</span>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>打轴控制</h3>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <button id="btn-timing-start" class="primary">开始打轴</button>
+            <button id="btn-timing-mark-start" class="mini-btn">标记起点</button>
+            <button id="btn-timing-mark" class="mini-btn">标记下一行（Space）</button>
+            <button id="btn-timing-undo" class="mini-btn">撤销上一个（Backspace）</button>
+            <button id="btn-timing-reset" class="mini-btn danger-text">重置</button>
+            <button id="btn-timing-finish" class="mini-btn success-text">完成并生成字幕</button>
+            <span id="timing-status" style="color: var(--muted); font-size: 12px;">未开始</span>
+          </div>
+          <p style="color: var(--muted); font-size: 12px; margin-top: 6px;">提示：播放媒体后，按空格 Space 为下一行记录当前时间；Backspace 撤销；完成后生成字幕。</p>
+        </div>
+
+        <div class="settings-section">
+          <h3>打轴波形</h3>
+          <div id="timing-waveform" class="player-waveform"></div>
+        </div>
+
+        <div class="settings-section">
+          <h3>行预览</h3>
+          <div id="timing-lines" class="line-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分句编辑 Modal -->
+  <div id="split-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>✂️ 分句编辑</h2>
+        <button id="btn-close-split" class="close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="split-mode">
+          <div class="mode-tabs">
+            <button class="mode-tab active" data-mode="split">分句</button>
+            <button class="mode-tab" data-mode="merge">合并</button>
+          </div>
+
+          <!-- 分句模式 -->
+          <div id="split-panel" class="split-section active">
+            <div class="split-info">
+              <p>选择要分句的字幕。<strong>快捷键：</strong>空格播放 | ← → 小幅(±0.1s) | ↑ ↓ 大幅(±1s)</p>
+              <div class="split-preview">
+                <div class="preview-label">原文</div>
+                <div id="split-en" class="preview-text"></div>
+                <div class="preview-label">翻译</div>
+                <div id="split-zh" class="preview-text"></div>
+              </div>
+            </div>
+            
+            <!-- 波形图区域 -->
+            <div class="waveform-container">
+              <div class="waveform-label">🎵 音频波形</div>
+              <div class="waveform-toolbar">
+                <button id="btn-region-align" class="mini-btn" title="对齐当前句到区域">对齐当前句</button>
+                <div class="zoom-controls">
+                  <button id="btn-zoom-out" class="mini-btn" title="缩小（-5%）">−</button>
+                  <input id="split-zoom-percent" type="number" class="zoom-input" value="100" min="100" max="2000" step="5" title="缩放百分比">
+                  <span class="zoom-label">%</span>
+                  <button id="btn-zoom-in" class="mini-btn" title="放大（+5%）">+</button>
+                  <button id="btn-zoom-reset" class="mini-btn" title="重置到100%">重置</button>
+                </div>
+                <input id="split-time-input" type="text" class="time-input" placeholder="0:00:00.000" title="精确分割时间 (Enter 跳转)" style="margin-left: auto;">
+              </div>
+              <div id="split-waveform" class="waveform-canvas" style="height: 96px;"></div>
+            </div>
+            
+            <!-- 播放控制区域 -->
+            <div class="playback-controls">
+              <div class="control-row">
+                <button id="btn-play-pause" class="primary" style="flex: 2;">▶️ 播放</button>
+                <div class="time-display" style="flex: 3; display: flex; gap: 8px; justify-content: center; align-items: center;">
+                  <span>开始：<strong id="split-start-time">0.0s</strong></span>
+                  <span style="color: red; font-weight: bold;">|</span>
+                  <span>分割：<strong id="split-cut-time">5.0s</strong></span>
+                  <span style="color: red; font-weight: bold;">|</span>
+                  <span>结束：<strong id="split-end-time">10.0s</strong></span>
+                </div>
+              </div>
+              
+              <div class="control-row" style="margin-top: 8px;">
+                <div style="flex: 1; text-align: center;">
+                  <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px;">大幅调整 (±1s)</div>
+                  <div style="display: flex; gap: 4px;">
+                    <button id="btn-backward-1s" class="small-btn" style="flex: 1;">⏪ -1s</button>
+                    <button id="btn-forward-1s" class="small-btn" style="flex: 1;">+1s ⏩</button>
+                  </div>
+                </div>
+                <div style="flex: 1; text-align: center;">
+                  <div style="font-size: 11px; color: var(--muted); margin-bottom: 4px;">小幅调整 (±0.1s)</div>
+                  <div style="display: flex; gap: 4px;">
+                    <button id="btn-backward-01s" class="small-btn" style="flex: 1;">◀ -0.1s</button>
+                    <button id="btn-forward-01s" class="small-btn" style="flex: 1;">+0.1s ▶</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div class="split-preview" style="margin-top: 12px;">
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                  <div class="preview-label">片段 1</div>
+                  <div style="margin-bottom: 8px;">
+                    <label style="font-size: 11px; color: var(--muted);">原文</label>
+                    <textarea id="split-part1-en" class="split-text-edit" rows="2"></textarea>
+                  </div>
+                  <div>
+                    <label style="font-size: 11px; color: var(--muted);">翻译</label>
+                    <textarea id="split-part1-zh" class="split-text-edit" rows="2"></textarea>
+                  </div>
+                </div>
+                <div>
+                  <div class="preview-label">片段 2</div>
+                  <div style="margin-bottom: 8px;">
+                    <label style="font-size: 11px; color: var(--muted);">原文</label>
+                    <textarea id="split-part2-en" class="split-text-edit" rows="2"></textarea>
+                  </div>
+                  <div>
+                    <label style="font-size: 11px; color: var(--muted);">翻译</label>
+                    <textarea id="split-part2-zh" class="split-text-edit" rows="2"></textarea>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <button id="btn-confirm-split" class="primary full-width" style="margin-top: 12px;">✂️ 执行分句</button>
+          </div>
+
+          <!-- 合并模式 -->
+          <div id="merge-panel" class="split-section">
+            <div class="split-info">
+              <p>选择相邻的字幕进行合并</p>
+              <div class="merge-list" id="merge-list"></div>
+            </div>
+            <div class="merge-controls" style="display: none;" id="merge-controls">
+              <button id="btn-confirm-merge" class="primary full-width">↔️ 执行合并</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- WaveSurfer for real waveform visualization -->
+  <script src="/static/lib/wavesurfer.min.js"></script>
+  <script src="/static/lib/regions.min.js"></script>
+  
+  <!-- Document Format Support Libraries -->
+  <!-- Markdown parsing -->
+  <script src="/static/lib/marked.umd.js"></script>
+  
+  <!-- Word/DOCX support (Mammoth.js) -->
+  <script src="/static/lib/mammoth.browser.min.js"></script>
+  
+  <!-- EPUB support (epub.js) -->
+  <script src="/static/lib/epub.min.js"></script>
+  
+  <!-- PDF support (PDF.js) -->
+  <script src="/static/lib/pdf.min.js"></script>
+  
+  <script src="/static/app.js"></script>
+  <script src="/static/split.js"></script>
+</body>
+</html>
