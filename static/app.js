@@ -1729,7 +1729,13 @@ const renderSubtitles = () => {
     row.dataset.index = idx;
 
     // 点击整行选中该字幕（不自动播放）
-    row.addEventListener('click', () => {
+    row.addEventListener('click', (e) => {
+      // 如果用户正在“划词/选择文本”，不要触发行点击（否则会重新渲染导致选区丢失）
+      try {
+        const selected = window.getSelection?.()?.toString?.().trim?.() || "";
+        if (selected) return;
+      } catch (_) {}
+
       state.currentIndex = idx;
       renderSubtitles();
       renderEditors?.();
@@ -1778,6 +1784,19 @@ const renderSubtitles = () => {
     }
     
     text.innerHTML = `<strong>${enText}</strong><br>${zhText}`;
+
+    // 文本区域的点击/拖拽主要用于划词，不应触发行点击导致重渲染
+    text.addEventListener('mousedown', (e) => {
+      // 允许选区正常建立，但阻止冒泡到 row 的 click 链路
+      e.stopPropagation();
+    }, false);
+    text.addEventListener('click', (e) => {
+      // 如果这是一次文本选择后的 click（常见于 mouseup 后），阻止行点击
+      try {
+        const selected = window.getSelection?.()?.toString?.().trim?.() || "";
+        if (selected) e.stopPropagation();
+      } catch (_) {}
+    }, false);
     
     // 为高亮词汇添加悬停气泡
     const highlights = text.querySelectorAll('.vocab-highlight');
@@ -3338,13 +3357,18 @@ const bindInputs = () => {
       return; // 让 split.js 的键盘处理接管
     }
 
-    // 如果手动打轴打开，则使用打轴快捷键
+    // 如果手动打轴打开，则使用打轴快捷键，但编辑文本时不响应
     const timingModal = document.getElementById('timing-modal');
     if (timingModal && timingModal.style.display === 'flex') {
-        if (e.code === 'Space') { e.preventDefault(); manualTimingMark(); return; }
-        if (e.code === 'Backspace') { e.preventDefault(); manualTimingUndo(); return; }
-        if (e.code === 'ArrowLeft') { e.preventDefault(); const p = document.getElementById('player'); if (p) p.currentTime = Math.max(0, (p.currentTime||0) - 5); return; }
-        if (e.code === 'ArrowRight') { e.preventDefault(); const p = document.getElementById('player'); if (p) p.currentTime = Math.min(p.duration||p.currentTime, (p.currentTime||0) + 5); return; }
+      const timingText = document.getElementById('timing-text');
+      if (timingText && document.activeElement === timingText) {
+        // 正在编辑文本框，忽略打轴快捷键
+        return;
+      }
+      if (e.code === 'Space') { e.preventDefault(); manualTimingMark(); return; }
+      if (e.code === 'Backspace') { e.preventDefault(); manualTimingUndo(); return; }
+      if (e.code === 'ArrowLeft') { e.preventDefault(); const p = document.getElementById('player'); if (p) p.currentTime = Math.max(0, (p.currentTime||0) - 5); return; }
+      if (e.code === 'ArrowRight') { e.preventDefault(); const p = document.getElementById('player'); if (p) p.currentTime = Math.min(p.duration||p.currentTime, (p.currentTime||0) + 5); return; }
       if (e.code === 'Enter') { e.preventDefault(); const p = document.getElementById('player'); if (p) { if (p.paused) p.play(); else p.pause(); } return; }
     }
     
@@ -5271,6 +5295,8 @@ window.App = {
   ...window.App,
   $,
   readingState,
+  // 暴露全局状态，供 split.js 等扩展使用
+  state,
   uploadReadingDocument,
   loadReadingDocument,
   displayReadingContent,
