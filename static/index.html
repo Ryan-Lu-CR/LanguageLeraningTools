@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>语言学习实验室</title>
+  <title>俄语学习实验室</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <header>
-    <h1>语言学习实验室</h1>
+    <h1>俄语学习实验室</h1>
     <nav class="mode-nav">
       <button id="mode-listening" class="mode-btn active" data-mode="listening">👂 听力训练</button>
       <button id="mode-reading" class="mode-btn" data-mode="reading">📖 阅读学习</button>
@@ -35,7 +35,43 @@
         </div>
       </div>
 
-      <!-- 左侧区域：播放器、字幕列表、编辑 -->
+      <!-- 左侧侧栏 -->
+      <aside class="left-sidebar" id="left-sidebar">
+        <!-- 侧栏内容 -->
+        <div class="sidebar-content">
+          <!-- 侧栏切换按钮 -->
+          <div class="sidebar-toggle" id="left-sidebar-toggle" title="展开/收起侧栏">
+            <span class="toggle-icon">◀</span>
+          </div>
+          <!-- 侧栏功能项 -->
+          <div class="sidebar-items">
+            <div class="sidebar-item" data-module="playlist" title="播放列表">
+              <div class="sidebar-icon">📋</div>
+              <div class="sidebar-label">播放列表</div>
+            </div>
+          </div>
+        </div>
+        <!-- 侧栏内容区域 -->
+        <div class="sidebar-panel" id="left-sidebar-panel">
+          <!-- 播放列表区 -->
+          <div id="playlist-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>📋 播放列表</h3>
+              <div class="header-actions">
+                <label for="audio-upload" class="badge success-text" title="批量添加文件">📁 添加</label>
+                <input type="file" id="audio-upload" accept="audio/*,video/*" multiple style="display:none;" />
+              </div>
+            </div>
+            <div class="module-body">
+
+              <h4 id="playlist-title" style="margin: 8px 0; font-size: 14px;">播放列表</h4>
+              <div id="playlist" class="playlist"></div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 中间区域：播放器、字幕列表、编辑 -->
       <aside class="main-panel">
         <!-- 播放器区 -->
       <section class="playback-section">
@@ -72,7 +108,7 @@
           <button class="collapse-btn" data-target="subtitle-list-wrapper" aria-label="折叠/展开字幕列表">▾</button>
           <div class="header-actions">
             <label class="badge" for="subtitle-upload" title="导入字幕">📥 导入</label>
-            <input type="file" id="subtitle-upload" accept=".json,.srt,.txt" style="display:none;" />
+            <input type="file" id="subtitle-upload" accept=".json,.srt,.txt,.lrc" style="display:none;" />
             <button id="btn-sub-delete" class="mini-btn danger-text" title="删除选中的字幕">🗑️ 删除</button>
             <button id="btn-sub-clear" class="mini-btn danger-text" title="清空字幕列表">🧹 清空</button>
           </div>
@@ -82,145 +118,184 @@
         </div>
       </section>
 
-      <!-- 字幕编辑区 -->
-      <section class="editor-section">
-        <div class="section-header">
-          <div class="section-title">✏️ 字幕编辑</div>
-          <button class="collapse-btn" data-target="editor-body" aria-label="折叠/展开字幕编辑">▾</button>
-          <div class="header-actions">
-            <button id="btn-export" class="mini-btn" title="导出 JSON">📤 JSON</button>
-            <button id="btn-export-srt" class="mini-btn" title="导出 SRT">📤 SRT</button>
-          </div>
-        </div>
-        <div id="editor-body" class="collapsible-body">
-          <div class="editors">
-            <div>
-              <div class="badge">原文</div>
-              <textarea id="edit-en" placeholder="生成的内容"></textarea>
-            </div>
-            <div>
-              <div class="badge">翻译</div>
-              <textarea id="edit-zh" placeholder="中文翻译"></textarea>
-            </div>
-          </div>
-          <div style="margin-top: 10px;">
-            <div class="badge">学习备注</div>
-            <textarea id="edit-note" class="editor-note" placeholder="语法、词汇、发音要点"></textarea>
-          </div>
-          <div class="editor-actions generation-row">
-            <button id="btn-auto-sub" class="primary" title="自动生成字幕">🎯 自动生成</button>
-            <button id="btn-manual-timing" class="primary" title="手动打轴（按行标记时间）">⏱️ 手动打轴</button>
-            <button id="btn-split-sub" class="primary" title="分句">✂️ 分句</button>
-          </div>
-        </div>
-      </section>
+
     </aside>
 
-    <!-- 右侧区域：工具和学习 -->
-    <aside class="tool-panel">
-      <!-- 控制区 -->
-      <section class="control-section">
-        <div class="section-header">
-          <div class="section-title">⚙️ 播放控制</div>
-          <button class="collapse-btn" data-target="control-body" aria-label="折叠/展开播放控制">▾</button>
+    <!-- 右侧侧栏：工具和学习 -->
+    <aside class="right-sidebar" id="right-sidebar">
+      <!-- 侧栏内容 -->
+      <div class="sidebar-content">
+        <!-- 侧栏切换按钮 -->
+        <div class="sidebar-toggle" id="sidebar-toggle" title="展开/收起侧栏">
+          <span class="toggle-icon">▶</span>
         </div>
-        <div id="control-body" class="collapsible-body">
-          <div class="control-grid">
-            <button id="btn-prev-sen" class="small-btn">⬅️ 上句</button>
-            <button id="btn-next-sen" class="small-btn">下句 ➡️</button>
-            <button id="toggle-loop" class="small-btn" title="单句循环">🔁 循环</button>
-            <button id="toggle-auto-pause" class="small-btn" title="自动暂停">⏸️ 自动暂停</button>
-            <button id="toggle-auto-play" class="small-btn" title="自动播放">▶️ 自动播放</button>
-            <button id="btn-listen-mode" class="small-btn" title="精听训练">👂 精听</button>
+        <!-- 侧栏功能项 -->
+        <div class="sidebar-items">
+          <div class="sidebar-item" data-module="control" title="播放控制">
+            <div class="sidebar-icon">⚙️</div>
+            <div class="sidebar-label">播放控制</div>
           </div>
-          <div class="loop-control" id="loop-control" style="display: none;">
-            <label style="font-size: 11px; color: var(--muted);">循环次数</label>
-            <select id="loop-count" class="small-select">
-              <option value="1">1次</option>
-              <option value="2" selected>2次</option>
-              <option value="3">3次</option>
-              <option value="5">5次</option>
-              <option value="-1">无限循环</option>
-            </select>
-            <label style="font-size: 11px; color: var(--muted); margin-top: 8px;">循环间隔</label>
-            <select id="loop-pause" class="small-select">
-              <option value="0">无间隔</option>
-              <option value="0.1">1/10 句长</option>
-              <option value="0.2" selected>1/5 句长</option>
-              <option value="0.33">1/3 句长</option>
-              <option value="0.5">1/2 句长</option>
-            </select>
-          </div>
-          <div class="status-bar">
-            <div id="loop-status" style="color: var(--muted); font-size: 11px;">🔁 循环: 关</div>
-            <div id="loop-pause-status" style="color: var(--muted); font-size: 11px;">⏱️ 间隔: 20%句长</div>
-            <div id="auto-pause-status" style="color: var(--muted); font-size: 11px;">⏸️ 自动暂停: 关</div>
-            <div id="auto-play-status" style="color: var(--muted); font-size: 11px;">▶️ 自动播放: 开</div>
-          </div>
-        </div>
-      </section>
 
-      <!-- 播放列表区（移至右侧，可折叠） -->
-      <section class="playlist-section">
-        <div class="section-header">
-          <div class="section-title">📋 播放列表</div>
-          <button class="collapse-btn" data-target="playlist-body" aria-label="折叠/展开播放列表">▾</button>
-          <div class="header-actions">
-            <label for="audio-upload" class="badge success-text" title="批量添加文件">📁 添加</label>
-            <input type="file" id="audio-upload" accept="audio/*,video/*" multiple style="display:none;" />
-            <button id="btn-clear-playlist" class="mini-btn danger-text" title="清空列表">🗑️ 清空</button>
+          <div class="sidebar-item" data-module="editor" title="字幕编辑">
+            <div class="sidebar-icon">✏️</div>
+            <div class="sidebar-label">字幕编辑</div>
           </div>
-        </div>
-        <div id="playlist-body" class="collapsible-body">
-          <div id="playlist-selector"></div>
-          <div id="playlist" class="playlist"></div>
-        </div>
-      </section>
 
-      <!-- 跟读区 -->
-      <section class="recording-section">
-        <div class="section-header">
-          <div class="section-title">🎤 跟读录音</div>
-          <button class="collapse-btn" data-target="recording-body" aria-label="折叠/展开录音">▾</button>
-          <div class="header-actions">
-            <button id="btn-clear-record" class="mini-btn danger-text" title="删除录音">🗑️ 删除</button>
+          <div class="sidebar-item" data-module="dictionary" title="词典">
+            <div class="sidebar-icon">📖</div>
+            <div class="sidebar-label">词典</div>
+          </div>
+          <div class="sidebar-item" data-module="vocab" title="生词本">
+            <div class="sidebar-icon">📚</div>
+            <div class="sidebar-label">生词本</div>
+          </div>
+          <div class="sidebar-item" data-module="recording" title="跟读录音">
+            <div class="sidebar-icon">🎤</div>
+            <div class="sidebar-label">跟读录音</div>
           </div>
         </div>
-        <div id="recording-body" class="collapsible-body">
-          <div class="recording-controls">
-            <button id="btn-record-toggle" class="primary">⏺️ 开始录音</button>
+      </div>
+      
+      <!-- 侧栏内容区域 -->
+      <div class="sidebar-panel" id="sidebar-panel">
+        <!-- 控制区 -->
+        <div id="control-module" class="sidebar-module">
+          <div class="module-header">
+            <h3>⚙️ 播放控制</h3>
           </div>
-          <audio id="record-audio" controls style="width:100%; margin-top:8px;"></audio>
+          <div class="module-body">
+            <div class="control-grid">
+              <button id="btn-prev-sen" class="small-btn">⬅️ 上句</button>
+              <button id="btn-next-sen" class="small-btn">下句 ➡️</button>
+              <button id="toggle-loop" class="small-btn" title="单句循环">🔁 循环</button>
+              <button id="toggle-auto-pause" class="small-btn" title="自动暂停">⏸️ 自动暂停</button>
+              <button id="toggle-auto-play" class="small-btn" title="自动播放">▶️ 自动播放</button>
+              <button id="btn-listen-mode" class="small-btn" title="精听训练">👂 精听</button>
+            </div>
+            <div class="loop-control" id="loop-control" style="display: none;">
+              <label style="font-size: 11px; color: var(--muted);">循环次数</label>
+              <select id="loop-count" class="small-select">
+                <option value="1">1次</option>
+                <option value="2" selected>2次</option>
+                <option value="3">3次</option>
+                <option value="5">5次</option>
+                <option value="-1">无限循环</option>
+              </select>
+              <label style="font-size: 11px; color: var(--muted); margin-top: 8px;">循环间隔</label>
+              <select id="loop-pause" class="small-select">
+                <option value="0">无间隔</option>
+                <option value="0.1">1/10 句长</option>
+                <option value="0.2" selected>1/5 句长</option>
+                <option value="0.33">1/3 句长</option>
+                <option value="0.5">1/2 句长</option>
+              </select>
+            </div>
+            <div class="status-bar">
+              <div id="loop-status" style="color: var(--muted); font-size: 11px;">🔁 循环: 关</div>
+              <div id="loop-pause-status" style="color: var(--muted); font-size: 11px;">⏱️ 间隔: 20%句长</div>
+              <div id="auto-pause-status" style="color: var(--muted); font-size: 11px;">⏸️ 自动暂停: 关</div>
+              <div id="auto-play-status" style="color: var(--muted); font-size: 11px;">▶️ 自动播放: 开</div>
+            </div>
+          </div>
         </div>
-      </section>
 
-      <!-- 生词本区 -->
-      <section class="vocab-section">
-        <div class="section-header">
-          <div class="section-title">📚 生词本</div>
-          <button class="collapse-btn" data-target="vocab-body" aria-label="折叠/展开生词本">▾</button>
-          <div class="header-actions">
-            <button id="btn-vocab-export" class="mini-btn" title="导出生词本">📤 导出</button>
-            <label for="vocab-import" class="badge" title="导入生词本">📥 导入</label>
-            <input id="vocab-import" type="file" accept=".json" style="display:none;" />
+        <!-- 字幕编辑区 -->
+        <div id="editor-module" class="sidebar-module">
+          <div class="module-header">
+            <h3>✏️ 字幕编辑</h3>
+            <div class="header-actions">
+              <button id="btn-export" class="mini-btn" title="导出 JSON">📤 JSON</button>
+              <button id="btn-export-srt" class="mini-btn" title="导出 SRT">📤 SRT</button>
+            </div>
+          </div>
+          <div class="module-body">
+            <div class="editors">
+              <div>
+                <div class="badge">原文</div>
+                <textarea id="edit-en" placeholder="生成的内容"></textarea>
+              </div>
+              <div>
+                <div class="badge">翻译</div>
+                <textarea id="edit-zh" placeholder="中文翻译"></textarea>
+              </div>
+            </div>
+            <div style="margin-top: 10px;">
+              <div class="badge">学习备注</div>
+              <textarea id="edit-note" class="editor-note" placeholder="语法、词汇、发音要点"></textarea>
+            </div>
+            <div class="editor-actions generation-row">
+              <button id="btn-auto-sub" class="primary" title="自动生成字幕">🎯 自动生成</button>
+              <button id="btn-manual-timing" class="primary" title="手动打轴（按行标记时间）">⏱️ 手动打轴</button>
+              <button id="btn-split-sub" class="primary" title="分句">✂️ 分句</button>
+            </div>
           </div>
         </div>
-        <div id="vocab-body" class="collapsible-body">
-          <!-- 生词本选择器 -->
-          <div class="vocabbook-selector-wrapper">
-            <select id="vocabbook-selector" class="vocabbook-select" title="选择生词本"></select>
-            <button id="btn-vocabbook-new" class="icon-btn" title="新建生词本">➕</button>
-            <button id="btn-vocabbook-rename" class="icon-btn" title="重命名生词本">✏️</button>
-            <button id="btn-vocabbook-delete" class="icon-btn" title="删除生词本">🗑️</button>
-          </div>
-          <div id="vocab-list"></div>
-        </div>
-      </section>
 
-      <!-- 设置区 -->
-      <section class="settings-section-bottom" style="display: none;">
-        <button id="btn-settings" class="full-width">⚙️ 设置与数据</button>
-      </section>
+        <!-- 跟读区 -->
+        <div id="recording-module" class="sidebar-module">
+          <div class="module-header">
+            <h3>🎤 跟读录音</h3>
+            <div class="header-actions">
+              <button id="btn-clear-record" class="mini-btn danger-text" title="删除录音">🗑️ 删除</button>
+            </div>
+          </div>
+          <div class="module-body">
+            <div class="recording-controls">
+              <button id="btn-record-toggle" class="primary">⏺️ 开始录音</button>
+            </div>
+            <audio id="record-audio" controls style="width:100%; margin-top:8px;"></audio>
+          </div>
+        </div>
+
+        <!-- 词典模块 -->
+        <div id="dictionary-module" class="sidebar-module">
+          <div class="module-header">
+            <h3>📖 词典</h3>
+            <div class="header-actions">
+              <button id="btn-dictionary-search" class="mini-btn" title="搜索词汇">🔍 搜索</button>
+              <button id="btn-dictionary-clear" class="mini-btn" title="清空搜索">🧹 清空</button>
+            </div>
+          </div>
+          <div class="module-body">
+            <div class="dictionary-search-wrapper">
+              <input type="text" id="dictionary-search-input" class="search-box" placeholder="输入单词或短语进行搜索...">
+              <div class="dictionary-search-controls">
+                <label class="badge" for="dictionary-search-case">区分大小写</label>
+                <input type="checkbox" id="dictionary-search-case" />
+                <label class="badge" for="dictionary-search-regex">正则表达式</label>
+                <input type="checkbox" id="dictionary-search-regex" />
+              </div>
+            </div>
+            <div id="dictionary-results" class="dictionary-results"></div>
+            <div id="dictionary-stats" class="dictionary-stats"></div>
+          </div>
+        </div>
+
+        <!-- 生词本区 -->
+        <div id="vocab-module" class="sidebar-module">
+          <div class="module-header">
+            <h3>📚 生词本</h3>
+            <div class="header-actions">
+              <button id="btn-vocab-export" class="mini-btn" title="导出生词本">📤 导出</button>
+              <label for="vocab-import" class="badge" title="导入生词本">📥 导入</label>
+              <input id="vocab-import" type="file" accept=".json" style="display:none;" />
+            </div>
+          </div>
+          <div class="module-body">
+            <!-- 生词本选择器 -->
+            <div class="vocabbook-selector-wrapper">
+              <select id="vocabbook-selector" class="vocabbook-select" title="选择生词本"></select>
+              <button id="btn-vocabbook-new" class="icon-btn" title="新建生词本">➕</button>
+              <button id="btn-vocabbook-rename" class="icon-btn" title="重命名生词本">✏️</button>
+              <button id="btn-vocabbook-delete" class="icon-btn" title="删除生词本">🗑️</button>
+            </div>
+            <div id="vocab-list"></div>
+          </div>
+        </div>
+
+        <!-- 设置区 -->
+
+      </div>
     </aside>
     </div>
 
@@ -240,13 +315,48 @@
         </div>
       </div>
 
-      <!-- 左侧：文本阅读区域 -->
+      <!-- 左侧侧栏 -->
+      <aside class="left-sidebar" id="reading-left-sidebar">
+        <!-- 侧栏内容 -->
+        <div class="sidebar-content">
+          <!-- 侧栏切换按钮 -->
+          <div class="sidebar-toggle" id="reading-left-sidebar-toggle" title="展开/收起侧栏">
+            <span class="toggle-icon">◀</span>
+          </div>
+          <!-- 侧栏功能项 -->
+          <div class="sidebar-items">
+            <div class="sidebar-item" data-module="documents" title="文档列表">
+              <div class="sidebar-icon">📚</div>
+              <div class="sidebar-label">文档列表</div>
+            </div>
+          </div>
+        </div>
+        <!-- 侧栏内容区域 -->
+        <div class="sidebar-panel" id="reading-left-sidebar-panel">
+          <!-- 文档列表区 -->
+          <div id="documents-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>📚 文档列表</h3>
+              <div class="header-actions">
+                <label for="reading-file-upload" class="badge success-text" title="导入文档">📁 添加</label>
+                <input type="file" id="reading-file-upload" accept=".pdf,.epub,.txt,.doc,.docx,.md" multiple style="display:none;" />
+                <button class="badge info-text" id="btn-create-folder" title="新建文件夹">📁 新建文件夹</button>
+              </div>
+            </div>
+            <div class="module-body">
+              <h4 id="reading-documents-title" style="margin: 8px 0; font-size: 14px;">文档列表</h4>
+              <div id="reading-documents-list" class="playlist"></div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 中间：文本阅读区域 -->
       <aside class="reading-main-panel">
         <!-- 文本展示区 -->
         <section class="reading-text-section">
           <div class="section-header">
             <div class="section-title">📖 阅读内容 · <span id="reading-current-file">未选择</span></div>
-            <button class="collapse-btn" data-target="reading-text-body" aria-label="折叠/展开阅读内容">▾</button>
             <div class="header-actions">
               <input type="text" id="reading-search-box" class="search-box" placeholder="🔍 搜索文本...">
             </div>
@@ -258,107 +368,147 @@
           </div>
         </section>
 
-        <!-- 阅读进度 -->
-        <section class="reading-nav-section">
-          <div class="section-header">
-            <div class="section-title">📊 阅读进度</div>
-            <button class="collapse-btn" data-target="reading-nav-body" aria-label="折叠/展开进度">▾</button>
-          </div>
-          <div id="reading-nav-body" class="collapsible-body">
-            <div class="progress-info">
-              <div class="progress-bar">
-                <div id="reading-scroll-progress" class="progress-fill" style="width: 0%;"></div>
-              </div>
-              <div id="reading-progress-text-info" style="text-align: center; font-size: 12px; color: var(--muted); margin-top: 8px;">
-                已阅读：<span id="reading-percent">0</span>%
-              </div>
-              <div style="text-align: center; font-size: 11px; color: var(--muted); margin-top: 4px;">
-                <span id="reading-chars-read">0</span> / <span id="reading-total-chars">0</span> 字 · <span id="reading-total-words">0</span> 词
-              </div>
-            </div>
-          </div>
-        </section>
 
-        <!-- 笔记区 -->
-        <section class="reading-notes-section">
-          <div class="section-header">
-            <div class="section-title">📝 笔记与标注</div>
-            <button class="collapse-btn" data-target="reading-notes-body" aria-label="折叠/展开笔记">▾</button>
-            <div class="header-actions">
-              <button id="btn-reading-export-notes" class="mini-btn" title="导出笔记">📤 导出</button>
-            </div>
-          </div>
-          <div id="reading-notes-body" class="collapsible-body">
-            <div id="reading-notes-list" class="notes-list"></div>
-            <textarea id="reading-current-note" class="note-editor" placeholder="选中文字后可以添加笔记..."></textarea>
-            <button id="btn-reading-add-note" class="primary" style="width: 100%; margin-top: 8px;">💾 保存笔记</button>
-          </div>
-        </section>
       </aside>
 
-      <!-- 右侧：文档列表和工具 -->
-      <aside class="reading-tool-panel">
-        <!-- 文档列表 -->
-        <section class="reading-documents-section">
-          <div class="section-header">
-            <div class="section-title">📚 文档列表</div>
-            <button class="collapse-btn" data-target="reading-documents-body" aria-label="折叠/展开文档列表">▾</button>
-            <div class="header-actions">
-              <label for="reading-file-upload" class="badge success-text" title="导入文档">📁 添加</label>
-              <input type="file" id="reading-file-upload" accept=".pdf,.epub,.txt,.doc,.docx,.md" multiple style="display:none;" />
-              <button id="btn-reading-clear-documents" class="mini-btn danger-text" title="清空列表">🗑️ 清空</button>
+      <!-- 右侧侧栏：文档列表和工具 -->
+      <aside class="right-sidebar" id="reading-right-sidebar">
+        <!-- 侧栏内容 -->
+        <div class="sidebar-content">
+          <!-- 侧栏切换按钮 -->
+          <div class="sidebar-toggle" id="reading-sidebar-toggle" title="展开/收起侧栏">
+          <span class="toggle-icon">▶</span>
+        </div>
+          <!-- 侧栏功能项 -->
+          <div class="sidebar-items">
+            <div class="sidebar-item" data-module="reading-dictionary" title="词典">
+              <div class="sidebar-icon">📖</div>
+              <div class="sidebar-label">词典</div>
+            </div>
+            <div class="sidebar-item" data-module="reading-vocab" title="生词本">
+              <div class="sidebar-icon">📚</div>
+              <div class="sidebar-label">生词本</div>
+            </div>
+            <div class="sidebar-item" data-module="reading-progress" title="阅读进度">
+              <div class="sidebar-icon">📊</div>
+              <div class="sidebar-label">阅读进度</div>
+            </div>
+            <div class="sidebar-item" data-module="reading-notes" title="笔记批注">
+              <div class="sidebar-icon">📝</div>
+              <div class="sidebar-label">笔记批注</div>
+            </div>
+            <div class="sidebar-item" data-module="analysis" title="文本分析">
+              <div class="sidebar-icon">📈</div>
+              <div class="sidebar-label">文本分析</div>
             </div>
           </div>
-          <div id="reading-documents-body" class="collapsible-body" style="border: 2px dashed var(--border); border-radius: 6px; transition: all 0.2s ease;">
-            <div id="reading-documents-list" class="playlist"></div>
+        </div>
+        
+        <!-- 侧栏内容区域 -->
+        <div class="sidebar-panel" id="reading-sidebar-panel">
+          <!-- 阅读进度模块 -->
+          <div id="reading-progress-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>📊 阅读进度</h3>
+            </div>
+            <div class="module-body">
+              <div class="progress-info">
+                <div class="progress-bar">
+                  <div id="reading-scroll-progress" class="progress-fill" style="width: 0%;"></div>
+                </div>
+                <div id="reading-progress-text-info" style="text-align: center; font-size: 12px; color: var(--muted); margin-top: 8px;">
+                  已阅读：<span id="reading-percent">0</span>%
+                </div>
+                <div style="text-align: center; font-size: 11px; color: var(--muted); margin-top: 4px;">
+                  <span id="reading-chars-read">0</span> / <span id="reading-total-chars">0</span> 字 · <span id="reading-total-words">0</span> 词
+                </div>
+              </div>
+            </div>
           </div>
-        </section>
 
-        <!-- 生词本（共享） -->
-        <section class="vocab-section">
-          <div class="section-header">
-            <div class="section-title">📚 生词本</div>
-            <button class="collapse-btn" data-target="reading-vocab-body" aria-label="折叠/展开生词本">▾</button>
-            <div class="header-actions">
-              <button id="btn-reading-vocab-export" class="mini-btn" title="导出生词本">📤 导出</button>
-              <label for="reading-vocab-import" class="badge" title="导入生词本">📥 导入</label>
-              <input id="reading-vocab-import" type="file" accept=".json" style="display:none;" />
+          <!-- 笔记批注模块 -->
+          <div id="reading-notes-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>📝 笔记与标注</h3>
+              <div class="header-actions">
+                <button id="btn-reading-export-notes" class="mini-btn" title="导出笔记">📤 导出</button>
+              </div>
+            </div>
+            <div class="module-body">
+              <div id="reading-notes-list" class="notes-list"></div>
+              <textarea id="reading-current-note" class="note-editor" placeholder="选中文字后可以添加笔记..."></textarea>
+              <button id="btn-reading-add-note" class="primary" style="width: 100%; margin-top: 8px;">💾 保存笔记</button>
             </div>
           </div>
-          <div id="reading-vocab-body" class="collapsible-body">
-            <div class="vocabbook-selector-wrapper">
-              <select id="reading-vocabbook-selector" class="vocabbook-select" title="选择生词本"></select>
-              <button id="btn-reading-vocabbook-new" class="icon-btn" title="新建生词本">➕</button>
-              <button id="btn-reading-vocabbook-rename" class="icon-btn" title="重命名生词本">✏️</button>
-              <button id="btn-reading-vocabbook-delete" class="icon-btn" title="删除生词本">🗑️</button>
-            </div>
-            <div id="reading-vocab-list" class="vocab-list"></div>
-          </div>
-        </section>
 
-        <!-- 文本分析 -->
-        <section class="reading-analysis-section">
-          <div class="section-header">
-            <div class="section-title">📈 文本分析</div>
-            <button class="collapse-btn" data-target="reading-analysis-body" aria-label="折叠/展开分析">▾</button>
+          <!-- 词典模块 -->
+          <div id="reading-dictionary-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>📖 词典</h3>
+              <div class="header-actions">
+                <button id="btn-reading-dictionary-search" class="mini-btn" title="搜索词汇">🔍 搜索</button>
+                <button id="btn-reading-dictionary-clear" class="mini-btn" title="清空搜索">🧹 清空</button>
+              </div>
+            </div>
+            <div class="module-body">
+              <div class="dictionary-search-wrapper">
+                <input type="text" id="reading-dictionary-search-input" class="search-box" placeholder="输入单词或短语进行搜索...">
+                <div class="dictionary-search-controls">
+                  <label class="badge" for="reading-dictionary-search-case">区分大小写</label>
+                  <input type="checkbox" id="reading-dictionary-search-case" />
+                  <label class="badge" for="reading-dictionary-search-regex">正则表达式</label>
+                  <input type="checkbox" id="reading-dictionary-search-regex" />
+                </div>
+              </div>
+              <div id="reading-dictionary-results" class="dictionary-results"></div>
+              <div id="reading-dictionary-stats" class="dictionary-stats"></div>
+            </div>
           </div>
-          <div id="reading-analysis-body" class="collapsible-body">
-            <div class="analysis-stats">
-              <div class="stat-item">
-                <span class="stat-label">总字数：</span>
-                <span id="reading-char-count" class="stat-value">0</span>
+
+          <!-- 生词本（共享） -->
+          <div id="reading-vocab-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>📚 生词本</h3>
+              <div class="header-actions">
+                <button id="btn-reading-vocab-export" class="mini-btn" title="导出生词本">📤 导出</button>
+                <label for="reading-vocab-import" class="badge" title="导入生词本">📥 导入</label>
+                <input id="reading-vocab-import" type="file" accept=".json" style="display:none;" />
               </div>
-              <div class="stat-item">
-                <span class="stat-label">生词数：</span>
-                <span id="reading-new-word-count" class="stat-value">0</span>
+            </div>
+            <div class="module-body">
+              <div class="vocabbook-selector-wrapper">
+                <select id="reading-vocabbook-selector" class="vocabbook-select" title="选择生词本"></select>
+                <button id="btn-reading-vocabbook-new" class="icon-btn" title="新建生词本">➕</button>
+                <button id="btn-reading-vocabbook-rename" class="icon-btn" title="重命名生词本">✏️</button>
+                <button id="btn-reading-vocabbook-delete" class="icon-btn" title="删除生词本">🗑️</button>
               </div>
-              <div class="stat-item">
-                <span class="stat-label">重复率：</span>
-                <span id="reading-repeat-rate" class="stat-value">0%</span>
+              <div id="reading-vocab-list" class="vocab-list"></div>
+            </div>
+          </div>
+
+          <!-- 文本分析 -->
+          <div id="analysis-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>📈 文本分析</h3>
+            </div>
+            <div class="module-body">
+              <div class="analysis-stats">
+                <div class="stat-item">
+                  <span class="stat-label">总字数：</span>
+                  <span id="reading-char-count" class="stat-value">0</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-label">生词数：</span>
+                  <span id="reading-new-word-count" class="stat-value">0</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-label">重复率：</span>
+                  <span id="reading-repeat-rate" class="stat-value">0%</span>
+                </div>
               </div>
             </div>
           </div>
-        </section>
+        </div>
       </aside>
     </div>
   </main>
@@ -387,6 +537,11 @@
         <div class="settings-section">
           <h3>模型与推理</h3>
           <div id="model-settings" class="settings-grid"></div>
+        </div>
+        <div class="settings-section">
+          <h3>播放默认偏好</h3>
+          <p style="margin-top: 4px; color: var(--muted); font-size: 12px;">用于控制每次打开应用时“自动暂停 / 切句自动播放”的默认开关状态（精听模式会临时覆盖这些设置）。</p>
+          <div id="playback-default-settings" class="settings-grid"></div>
         </div>
         <div class="settings-section">
           <h3>折叠偏好</h3>
@@ -595,6 +750,9 @@
   
   <!-- PDF support (PDF.js) -->
   <script src="/static/lib/pdf.min.js"></script>
+  
+  <!-- Context Menu -->
+  <div id="context-menu" class="context-menu"></div>
   
   <script src="/static/app.js"></script>
   <script src="/static/split.js"></script>

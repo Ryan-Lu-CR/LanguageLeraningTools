@@ -9,20 +9,10 @@ const state = {
   autoPause: false,
   autoPlay: true,  // 自动播放：仅用于上下句切换时自动开始播放
   mediaTitle: "",
-  playlists: [],  // 播放列表集合 [{id, name, items: [...]}, ...]
-  currentPlaylistId: null,  // 当前活跃播放列表ID
+  playlist: [],  // 单一播放列表
   currentPlaylistIndex: -1,  // 当前播放项索引
-  // 为向后兼容，保留旧的 playlist 引用，指向当前活跃列表的 items
-  get playlist() {
-    if (!this.currentPlaylistId) return [];
-    const pl = this.playlists.find(p => p.id === this.currentPlaylistId);
-    return pl ? pl.items : [];
-  },
-  set playlist(value) {
-    if (!this.currentPlaylistId) return;
-    const pl = this.playlists.find(p => p.id === this.currentPlaylistId);
-    if (pl) pl.items = value;
-  },
+  selectedPlaylistIndices: [],  // 多选的播放列表项索引
+  lastClickedIndex: -1,  // 上次点击的索引（用于 Shift 选择）
   recording: {
     mediaRecorder: null,
     chunks: [],
@@ -42,16 +32,42 @@ const state = {
     const vb = this.vocabBooks.find(v => v.id === this.currentVocabBookId);
     if (vb) vb.words = value;
   },
-  // 撤销/重做历史
+  // 撤销/重做历史（字幕）
   history: [],
   historyIndex: -1,
   maxHistory: 50,
+  // 播放列表历史
+  playlistHistory: [],
+  playlistHistoryIndex: -1,
+  maxPlaylistHistory: 50,
+  folderExpandedStates: {}, // 文件夹展开状态
   // 操作取消标志
   cancelOperation: false,
   settings: {
     collapsed: {}, // 各功能区折叠状态
     commonDefaultVocab: true, // 听力和阅读是否使用通用默认生词本
+    // 播放默认偏好（用于初始化 state.autoPause/autoPlay）
+    defaultAutoPause: false,
+    defaultAutoPlay: true,
+    // 侧栏状态
+    sidebar: {
+      listening: {
+        collapsed: false,
+        currentModule: 'control'
+      },
+      reading: {
+        collapsed: false,
+        currentModule: 'reading-dictionary'
+      }
+    }
   },
+  // 右键菜单状态
+  contextMenu: {
+    visible: false,
+    target: null,
+    targetType: null,  // 'playlist-file', 'playlist-folder', 'playlist-root', 'documents-file', 'documents-folder', 'documents-root'
+    nodeData: null
+  }
 };
 
 const persistSettings = async () => {
@@ -75,11 +91,137 @@ const loadSettings = async () => {
       state.settings = {
         collapsed: data.settings.collapsed || {},
         commonDefaultVocab: data.settings.commonDefaultVocab !== undefined ? data.settings.commonDefaultVocab : true,
+        defaultAutoPause: data.settings.defaultAutoPause !== undefined ? !!data.settings.defaultAutoPause : false,
+        defaultAutoPlay: data.settings.defaultAutoPlay !== undefined ? !!data.settings.defaultAutoPlay : true,
+        sidebar: data.settings.sidebar || {
+          listening: {
+            collapsed: false,
+            currentModule: 'control'
+          },
+          reading: {
+            collapsed: false,
+            currentModule: 'reading-dictionary'
+          }
+        }
       };
       console.log('✓ 设置已从服务器加载');
     }
   } catch (e) {
     console.warn("加载设置失败，使用默认值", e);
+  }
+};
+
+const grammarLabelMap = {
+  pos: {
+    'NOUN': '名词',
+    'VERB': '动词',
+    'ADJF': '形容词',
+    'ADJS': '形容词短尾',
+    'COMP': '比较级',
+    'PRTF': '形动词',
+    'PRTS': '形动词短尾',
+    'GRND': '副动词',
+    'NUMR': '数词',
+    'ADVB': '副词',
+    'NPRO': '代词',
+    'PRED': '谓语副词',
+    'PREP': '前置词',
+    'CONJ': '连接词',
+    'PRCL': '语气词',
+    'INTJ': '感叹词'
+  },
+  case: {
+    'nomn': '主格',
+    'gent': '属格',
+    'datv': '与格',
+    'accs': '宾格',
+    'ablt': '工具格',
+    'loct': '前置格'
+  },
+  gender: {
+    'masc': '阳性',
+    'femn': '阴性',
+    'neut': '中性',
+    'Ms-f': '通性'
+  },
+  number: {
+    'sing': '单数',
+    'plur': '复数'
+  },
+  tense: {
+    'pres': '现在时',
+    'past': '过去时',
+    'futr': '将来时'
+  },
+  person: {
+    '1per': '一',
+    '2per': '二',
+    '3per': '三'
+  },
+  voice: {
+    'actv': '主动语态',
+    'pssv': '被动语态'
+  },
+  mood: {
+    'indc': '陈述式',
+    'impr': '命令式'
+  },
+  aspect: {
+    'impf': '未完成体',
+    'perf': '完成体'
+  },
+  animacy: {
+    'anim': '有生命',
+    'inan': '无生命'
+  },
+  transitivity: {
+    'tran': '及物',
+    'intr': '不及物'
+  },
+  involvement: {
+    'Infr': '非正式',
+    'Slng': '俚语',
+    'Arch': '古语',
+    'Litr': '文学',
+    'Coll': '口语',
+    'Vulg': '粗俗',
+    'excl': '例外'
+  }
+};
+
+const translateGrammarLabel = (category, value) => {
+  if (!value) return null;
+  if (grammarLabelMap[category] && grammarLabelMap[category][value]) {
+    return grammarLabelMap[category][value];
+  }
+  return value;
+};
+
+const persistPlaylist = async () => {
+  console.log('播放列表已从真实文件夹加载，无需保存');
+};
+
+const loadPlaylist = async () => {
+  try {
+    const response = await fetch('/api/playlist/scan');
+    const data = await response.json();
+    if (data.status === 'success') {
+      state.playlist = data.playlist || [];
+      state.currentPlaylistIndex = -1;
+      console.log(`✓ 播放列表已从服务器加载 (${state.playlist.length} 项)`);
+      
+      // 保存初始状态到历史记录
+      if (state.playlistHistory.length === 0) {
+        const snapshot = JSON.parse(JSON.stringify(state.playlist));
+        state.playlistHistory.push(snapshot);
+        state.playlistHistoryIndex = 0;
+        console.log('[loadPlaylist] 保存初始播放列表状态到历史');
+      }
+      
+      renderPlaylist();
+    }
+  } catch (e) {
+    console.warn("加载播放列表失败，使用空列表", e);
   }
 };
 
@@ -214,6 +356,7 @@ const renderModelSettings = async () => {
 
 // 播放列表拖拽源索引
 let playlistDragIndex = null;
+let playlistDragIndices = [];
 let isPlaylistDragging = false;
 
 // Utility helpers -----------------------------------------------------------
@@ -265,6 +408,14 @@ const updatePlayerMediaMode = (isAudio) => {
       // 音频模式：关闭并排布局，恢复默认高度
       playbackBody.classList.remove('video-split');
       waveform.style.height = '';
+      // 重置 WaveSurfer 的高度选项为默认值 80px
+      try {
+        if (playerWavesurfer && typeof playerWavesurfer.setOptions === 'function') {
+          playerWavesurfer.setOptions({ height: 80, fillParent: true });
+        }
+      } catch (e) {
+        // 忽略不支持的情况
+      }
     }
   }
 };
@@ -281,7 +432,7 @@ const syncWaveformHeight = () => {
   waveform.style.height = `${h}px`;
   try {
     if (playerWavesurfer && typeof playerWavesurfer.setOptions === 'function') {
-      playerWavesurfer.setOptions({ height: h });
+      playerWavesurfer.setOptions({ height: h, fillParent: true });
     }
   } catch (e) {
     // 忽略不支持的情况
@@ -316,6 +467,54 @@ const saveHistory = () => {
   
   updateHistoryButtons();
   logEvent('historySaved', { index: state.historyIndex, total: state.history.length });
+};
+
+const savePlaylistHistory = () => {
+  // 删除当前索引之后的所有历史记录
+  if (state.playlistHistoryIndex < state.playlistHistory.length - 1) {
+    state.playlistHistory = state.playlistHistory.slice(0, state.playlistHistoryIndex + 1);
+  }
+  
+  // 添加新的历史记录
+  const snapshot = JSON.parse(JSON.stringify(state.playlist));
+  state.playlistHistory.push(snapshot);
+  
+  // 限制历史记录数量
+  if (state.playlistHistory.length > state.maxPlaylistHistory) {
+    state.playlistHistory.shift();
+  } else {
+    state.playlistHistoryIndex++;
+  }
+  
+  console.log(`[savePlaylistHistory] 保存播放列表历史，索引: ${state.playlistHistoryIndex}, 总数: ${state.playlistHistory.length}`);
+};
+
+const undoPlaylist = () => {
+  if (state.playlistHistoryIndex > 0) {
+    state.playlistHistoryIndex--;
+    state.playlist = JSON.parse(JSON.stringify(state.playlistHistory[state.playlistHistoryIndex]));
+    state.currentPlaylistIndex = -1;
+    state.selectedPlaylistIndices = [];
+    state.lastClickedIndex = -1;
+    renderPlaylist();
+    console.log(`[undoPlaylist] 撤销到索引: ${state.playlistHistoryIndex}`);
+  } else {
+    console.log('[undoPlaylist] 无法撤销，已经是第一个状态');
+  }
+};
+
+const redoPlaylist = () => {
+  if (state.playlistHistoryIndex < state.playlistHistory.length - 1) {
+    state.playlistHistoryIndex++;
+    state.playlist = JSON.parse(JSON.stringify(state.playlistHistory[state.playlistHistoryIndex]));
+    state.currentPlaylistIndex = -1;
+    state.selectedPlaylistIndices = [];
+    state.lastClickedIndex = -1;
+    renderPlaylist();
+    console.log(`[redoPlaylist] 重做到索引: ${state.playlistHistoryIndex}`);
+  } else {
+    console.log('[redoPlaylist] 无法重做，已经是最新状态');
+  }
 };
 
 const undo = () => {
@@ -353,8 +552,8 @@ const persistSubtitles = async () => {
   // 同时保存到 localStorage 和服务器
   localStorage.setItem(storageKey("subs"), JSON.stringify(state.subtitles));
   
-  // 异步保存到服务器
-  if (state.mediaTitle && state.subtitles.length > 0) {
+  // 异步保存到服务器（即使字幕为空数组也要保存，以覆盖服务器上的旧数据）
+  if (state.mediaTitle) {
     try {
       await fetch('/api/subtitles/save', {
         method: 'POST',
@@ -364,7 +563,7 @@ const persistSubtitles = async () => {
           subtitles: state.subtitles
         })
       });
-      console.log('✓ 字幕已同步到服务器');
+      console.log(`✓ 字幕已同步到服务器 (${state.subtitles.length} 条)`);
     } catch (e) {
       console.warn('服务器同步失败，已保存到本地', e);
     }
@@ -372,13 +571,78 @@ const persistSubtitles = async () => {
 };
 
 const loadPersistedSubtitles = () => {
-  const raw = localStorage.getItem(storageKey("subs"));
+  const key = storageKey("subs");
+  const raw = localStorage.getItem(key);
   if (!raw) return;
+  
+  // 检查数据大小，如果太大给出警告并限制加载
+  const rawSize = raw.length;
+  const sizeInMB = rawSize / (1024 * 1024);
+  
+  if (sizeInMB > 50) { // 如果字幕数据超过50MB，可能有问题
+    console.warn(`字幕数据过大: ${sizeInMB.toFixed(2)} MB，可能损坏或异常，跳过加载`);
+    // 可选：询问用户是否尝试清理损坏的数据
+    if (confirm(`检测到过大的字幕数据（${sizeInMB.toFixed(2)} MB），可能已损坏。是否清除此数据？`)) {
+      localStorage.removeItem(key);
+    }
+    return;
+  }
+  
   try {
     const saved = JSON.parse(raw);
-    if (Array.isArray(saved)) state.subtitles = saved;
-  } catch (_) {
-    console.warn("Failed to parse saved subtitles");
+    
+    // 验证数据格式
+    if (!Array.isArray(saved)) {
+      console.warn("字幕数据格式错误：不是数组");
+      return;
+    }
+    
+    // 检查数组长度是否合理（假设最多10000条字幕）
+    if (saved.length > 10000) {
+      console.warn(`字幕数量异常：${saved.length} 条，可能损坏`);
+      if (confirm(`检测到异常数量的字幕（${saved.length} 条），可能已损坏。是否清除此数据？`)) {
+        localStorage.removeItem(key);
+      }
+      return;
+    }
+    
+    // 验证每条字幕的基本结构
+    for (let i = 0; i < Math.min(saved.length, 100); i++) { // 只检查前100条
+      const sub = saved[i];
+      if (sub && typeof sub === 'object') {
+        // 检查必要的字段
+        if (typeof sub.start !== 'number' || typeof sub.end !== 'number') {
+          console.warn(`字幕 ${i} 缺少时间字段，数据可能损坏`);
+          if (confirm("检测到损坏的字幕数据。是否清除此数据？")) {
+            localStorage.removeItem(key);
+            return;
+          }
+        }
+      }
+    }
+    
+    state.subtitles = saved;
+    console.log(`✓ 从 localStorage 加载 ${saved.length} 条字幕，大小: ${sizeInMB.toFixed(2)} MB`);
+  } catch (e) {
+    console.warn("解析保存的字幕失败:", e);
+    // 尝试修复常见问题
+    try {
+      // 尝试清理可能的问题字符
+      const cleaned = raw.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+      const saved = JSON.parse(cleaned);
+      if (Array.isArray(saved)) {
+        state.subtitles = saved;
+        console.log(`✓ 修复后加载 ${saved.length} 条字幕`);
+        // 保存修复后的数据
+        localStorage.setItem(key, JSON.stringify(saved));
+      }
+    } catch (e2) {
+      console.error("无法修复损坏的字幕数据:", e2);
+      // 询问用户是否清除损坏的数据
+      if (confirm("字幕数据损坏无法修复。是否清除此数据？")) {
+        localStorage.removeItem(key);
+      }
+    }
   }
 };
 
@@ -812,229 +1076,7 @@ const renderVocabBookSelector = () => {
   }
 };// Playlist management -------------------------------------------------------
 
-// 生成唯一ID
-const generatePlaylistId = () => {
-  return "pl_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9);
-};
 
-// 创建新播放列表
-const createPlaylist = (name = "新播放列表") => {
-  const id = generatePlaylistId();
-  const newPlaylist = { id, name, items: [] };
-  state.playlists.push(newPlaylist);
-  // 自动切换到新播放列表
-  switchPlaylist(id);
-  persistPlaylists();
-  renderPlaylistSelector();
-  renderPlaylist();
-  return id;
-};
-
-// 删除播放列表
-const deletePlaylist = (id) => {
-  if (state.playlists.length <= 1) {
-    alert("至少需要保留一个播放列表");
-    return;
-  }
-  if (!confirm("确定要删除此播放列表吗？")) return;
-  
-  const index = state.playlists.findIndex(p => p.id === id);
-  if (index > -1) {
-    // 清理该列表中的URL
-    state.playlists[index].items.forEach(item => {
-      if (item.url) URL.revokeObjectURL(item.url);
-    });
-    state.playlists.splice(index, 1);
-    
-    // 如果删除的是当前列表，切换到第一个
-    if (state.currentPlaylistId === id) {
-      if (state.playlists.length > 0) {
-        switchPlaylist(state.playlists[0].id);
-      } else {
-        createPlaylist("默认播放列表");
-      }
-    }
-    
-    persistPlaylists();
-    renderPlaylistSelector();
-    renderPlaylist();
-  }
-};
-
-// 切换播放列表
-const switchPlaylist = (id) => {
-  const playlist = state.playlists.find(p => p.id === id);
-  if (playlist) {
-    state.currentPlaylistId = id;
-    state.currentPlaylistIndex = -1;
-    $("#player").src = "";
-    state.mediaTitle = "";
-    updateMediaName();
-    persistPlaylists();
-    renderPlaylistSelector();
-    renderPlaylist();
-  }
-};
-
-// 重命名播放列表
-const renamePlaylist = (id) => {
-  const playlist = state.playlists.find(p => p.id === id);
-  if (!playlist) return;
-  const newName = prompt("新的播放列表名称:", playlist.name);
-  if (newName && newName.trim()) {
-    playlist.name = newName.trim();
-    persistPlaylists();
-    renderPlaylistSelector();
-  }
-};
-
-// 持久化所有播放列表
-const persistPlaylists = async () => {
-  const toSave = state.playlists.map(pl => ({
-    id: pl.id,
-    name: pl.name,
-    items: pl.items.map(item => ({
-      name: item.name,
-      serverPath: item.serverPath || null,
-    })),
-  }));
-  
-  try {
-    await fetch('/api/playlists/save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        playlists: toSave,
-        currentPlaylistId: state.currentPlaylistId
-      })
-    });
-    console.log('✓ 播放列表已保存到服务器');
-  } catch (e) {
-    console.warn('播放列表保存失败', e);
-  }
-};
-
-// 加载所有播放列表
-const loadPlaylists = async () => {
-  try {
-    // 1. 尝试从服务器加载播放列表（新格式）
-    const response = await fetch('/api/playlists/load');
-    const data = await response.json();
-    
-    if (data.status === 'success' && data.playlists && data.playlists.length > 0) {
-      // 成功加载新格式数据
-      const playlists = data.playlists;
-      const currentId = data.currentPlaylistId;
-      state.playlists = [];
-      
-      for (const pl of playlists) {
-        const playlistObj = { id: pl.id, name: pl.name, items: [] };
-        
-        for (const item of pl.items) {
-          const storedPath = typeof item.serverPath === "string" ? item.serverPath : null;
-          if (storedPath) {
-            try {
-              const response = await fetch(`/api/media/load/${encodeURIComponent(storedPath)}`);
-              if (response.ok) {
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                playlistObj.items.push({
-                  name: item.name,
-                  url: url,
-                  file: null,
-                  serverPath: storedPath,
-                });
-              }
-            } catch (e) {
-              console.warn(`加载失败: ${item.name}`, e);
-            }
-          }
-        }
-        
-        state.playlists.push(playlistObj);
-      }
-      
-      // 恢复当前播放列表
-      if (currentId && state.playlists.find(p => p.id === currentId)) {
-        state.currentPlaylistId = currentId;
-      } else if (state.playlists.length > 0) {
-        state.currentPlaylistId = state.playlists[0].id;
-      }
-      
-      console.log(`✓ 已恢复 ${state.playlists.length} 个播放列表`);
-      return;
-    }
-    
-    // 2. 如果服务器没有数据，尝试从 localStorage 迁移
-    console.log('尝试从localStorage迁移播放列表...');
-    const localPlaylists = localStorage.getItem("lr-playlists");
-    const localCurrentId = localStorage.getItem("lr-current-playlist-id");
-    
-    if (localPlaylists) {
-      try {
-        const oldPlaylists = JSON.parse(localPlaylists);
-        if (Array.isArray(oldPlaylists) && oldPlaylists.length > 0) {
-          state.playlists = [];
-          
-          for (const pl of oldPlaylists) {
-            const playlistObj = { id: pl.id, name: pl.name, items: [] };
-            
-            for (const item of pl.items) {
-              const storedPath = typeof item.serverPath === "string" ? item.serverPath : null;
-              if (storedPath) {
-                try {
-                  const response = await fetch(`/api/media/load/${encodeURIComponent(storedPath)}`);
-                  if (response.ok) {
-                    const blob = await response.blob();
-                    const url = URL.createObjectURL(blob);
-                    playlistObj.items.push({
-                      name: item.name,
-                      url: url,
-                      file: null,
-                      serverPath: storedPath,
-                    });
-                  }
-                } catch (e) {
-                  console.warn(`加载失败: ${item.name}`, e);
-                }
-              }
-            }
-            
-            state.playlists.push(playlistObj);
-          }
-          
-          // 恢复当前播放列表
-          if (localCurrentId && state.playlists.find(p => p.id === localCurrentId)) {
-            state.currentPlaylistId = localCurrentId;
-          } else if (state.playlists.length > 0) {
-            state.currentPlaylistId = state.playlists[0].id;
-          }
-          
-          // 保存到服务器
-          await persistPlaylists();
-          console.log(`✓ 已从localStorage迁移 ${state.playlists.length} 个播放列表`);
-          return;
-        }
-      } catch (e) {
-        console.warn('从localStorage迁移失败', e);
-      }
-    }
-    
-    // 3. 如果都没有数据，创建默认播放列表
-    state.playlists = [];
-    const id = generatePlaylistId();
-    state.playlists.push({ id, name: "默认播放列表", items: [] });
-    state.currentPlaylistId = id;
-    console.log('✓ 已创建默认播放列表');
-    
-  } catch (e) {
-    console.warn("加载播放列表失败，使用默认值", e);
-    state.playlists = [];
-    const id = generatePlaylistId();
-    state.playlists.push({ id, name: "默认播放列表", items: [] });
-    state.currentPlaylistId = id;
-  }
-};
 
 const setCollapsedState = (targetId, collapsed) => {
   const body = targetId ? document.getElementById(targetId) : null;
@@ -1046,6 +1088,20 @@ const setCollapsedState = (targetId, collapsed) => {
   }
   state.settings.collapsed[targetId] = !!collapsed;
   persistSettings();
+};
+
+// 展开/折叠词法分析
+window.toggleAnalyses = () => {
+  const btn = document.getElementById('toggle-text');
+  const allAnalyses = document.querySelectorAll('[id^="analysis-"]');
+  const isExpanded = btn.textContent === '收起';
+  
+  allAnalyses.forEach((el, index) => {
+    if (index < 2) return;
+    el.style.display = isExpanded ? 'none' : 'block';
+  });
+  
+  btn.textContent = isExpanded ? '显示更多' : '收起';
 };
 
 // 折叠/展开面板
@@ -1064,96 +1120,1112 @@ const bindCollapsibles = () => {
   });
 };
 
-const addToPlaylist = async (files) => {
-  for (const file of files) {
-    const url = URL.createObjectURL(file);
-    let serverPath = null;
-
-    // 上传文件到服务器（失败会提示刷新后丢失）
+// 词典搜索功能
+function initDictionarySearch() {
+  // 主要词典模块
+  const mainSearchInput = document.getElementById('dictionary-search-input');
+  const mainSearchBtn = document.getElementById('btn-dictionary-search');
+  const mainResults = document.getElementById('dictionary-results');
+  const mainStats = document.getElementById('dictionary-stats');
+  const mainClearBtn = document.getElementById('btn-dictionary-clear');
+  
+  // 阅读模式词典模块
+  const readingSearchInput = document.getElementById('reading-dictionary-search-input');
+  const readingSearchBtn = document.getElementById('btn-reading-dictionary-search');
+  const readingResults = document.getElementById('reading-dictionary-results');
+  const readingStats = document.getElementById('reading-dictionary-stats');
+  const readingClearBtn = document.getElementById('btn-reading-dictionary-clear');
+  
+  // 搜索函数
+  async function performSearch(word, resultsEl, statsEl) {
+    if (!word.trim()) {
+      resultsEl.innerHTML = '<p style="color: var(--muted);">请输入要搜索的单词或短语</p>';
+      statsEl.innerHTML = '';
+      return;
+    }
+    
     try {
-      const formData = new FormData();
-      formData.append('media', file);
-      const response = await fetch('/api/media/upload', {
+      resultsEl.innerHTML = '<p style="color: var(--muted);">正在搜索...</p>';
+      
+      const response = await fetch('/api/dictionary/lookup', {
         method: 'POST',
-        body: formData
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ word: word.trim(), analyze: true })
       });
-      // 尝试解析 JSON，失败则回退文本
-      let data = null;
-      let errText = "";
-      try {
-        data = await response.json();
-      } catch (e) {
-        errText = await response.text();
-      }
-
-      if (!response.ok || !data || data.status !== 'success') {
-        const msg = (data && data.error) || errText || `上传失败 (HTTP ${response.status})`;
-        alert(`上传失败，刷新后会丢失：${file.name}\n原因：${msg}`);
-        console.warn(`⚠ 上传失败: ${file.name} — ${msg}`);
+      
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        displaySearchResults(data, resultsEl, statsEl);
       } else {
-        serverPath = data.filename || file.name;
-        console.log(`✓ 文件已上传到服务器: ${file.name}`);
+        resultsEl.innerHTML = `<p style="color: var(--error);">搜索失败: ${data.error}</p>`;
+        statsEl.innerHTML = '';
+      }
+    } catch (error) {
+      resultsEl.innerHTML = `<p style="color: var(--error);">搜索出错: ${error.message}</p>`;
+      statsEl.innerHTML = '';
+    }
+  }
+  
+  // 显示搜索结果
+  function displaySearchResults(data, resultsEl, statsEl) {
+    let html = '';
+    
+    const inputWord = data.morphology?.word || '';
+    
+    if (data.morphology && data.morphology.analyses && data.morphology.analyses.length > 0) {
+      html += '<div class="dictionary-analysis" style="margin-bottom: 15px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 4px;">';
+      html += '<strong style="font-size: 14px; margin-bottom: 10px; display: block;">📊 词法分析</strong>';
+      
+      html += '<div class="morphology-grid" style="display: grid; gap: 12px; max-height: 150px; overflow-x: auto; padding-right: 4px; scrollbar-width: thin; scrollbar-color: rgba(100, 150, 255, 0.5) rgba(255,255,255,0.1);">';
+      
+      data.morphology.analyses.forEach((analysis, index) => {
+        html += '<div style="padding: 10px; background: rgba(255,255,255,0.03); border-radius: 4px; border: 1px solid rgba(255,255,255,0.1);">';
+        html += `<div style="margin-bottom: 6px;">`;
+        
+        if (inputWord && inputWord.toLowerCase() !== analysis.normal_form.toLowerCase()) {
+          html += `<span style="color: var(--text); font-size: 14px; font-weight: bold;">${inputWord}</span>`;
+          html += ` <span style="color: var(--muted); font-size: 12px;">→</span> `;
+        }
+        
+        html += `<span style="color: var(--primary); font-size: 14px; font-weight: bold;">${analysis.normal_form}</span>`;
+        if (analysis.pos) {
+          const translatedPos = translateGrammarLabel('pos', analysis.pos);
+          html += ` <span style="color: var(--accent); font-size: 11px; padding: 1px 5px; background: rgba(255,165,0,0.2); border-radius: 3px;">${translatedPos}</span>`;
+        }
+        html += ` <span style="color: var(--muted); font-size: 10px;">(置信度: ${(analysis.score * 100).toFixed(1)}%)</span>`;
+        html += `</div>`;
+        
+        const attributes = [];
+        if (analysis.case) attributes.push(`<span style="color: var(--secondary);">格: ${translateGrammarLabel('case', analysis.case)}</span>`);
+        if (analysis.gender) attributes.push(`<span style="color: var(--secondary);">性: ${translateGrammarLabel('gender', analysis.gender)}</span>`);
+        if (analysis.number) attributes.push(`<span style="color: var(--secondary);">数: ${translateGrammarLabel('number', analysis.number)}</span>`);
+        if (analysis.tense) attributes.push(`<span style="color: var(--secondary);">时态: ${translateGrammarLabel('tense', analysis.tense)}</span>`);
+        if (analysis.person) attributes.push(`<span style="color: var(--secondary);">人称: ${translateGrammarLabel('person', analysis.person)}</span>`);
+        if (analysis.voice) attributes.push(`<span style="color: var(--secondary);">语态: ${translateGrammarLabel('voice', analysis.voice)}</span>`);
+        if (analysis.mood) attributes.push(`<span style="color: var(--secondary);">式: ${translateGrammarLabel('mood', analysis.mood)}</span>`);
+        if (analysis.aspect) attributes.push(`<span style="color: var(--secondary);">体: ${translateGrammarLabel('aspect', analysis.aspect)}</span>`);
+        if (analysis.animacy) attributes.push(`<span style="color: var(--secondary);">有生命性: ${translateGrammarLabel('animacy', analysis.animacy)}</span>`);
+        if (analysis.transitivity) attributes.push(`<span style="color: var(--secondary);">及物性: ${translateGrammarLabel('transitivity', analysis.transitivity)}</span>`);
+        if (analysis.involvement) attributes.push(`<span style="color: var(--secondary);">参与性: ${translateGrammarLabel('involvement', analysis.involvement)}</span>`);
+        
+        if (attributes.length > 0) {
+          html += '<div style="font-size: 11px; line-height: 1.5;">';
+          html += attributes.join('<br>');
+          html += '</div>';
+        }
+        
+        html += '</div>';
+      });
+      
+      html += '</div>';
+      html += '</div>';
+    }
+    
+    // 显示变格形式
+    if (data.inflections && data.inflections.inflections && Object.keys(data.inflections.inflections).length > 0) {
+      html += '<div class="dictionary-inflections" style="margin-bottom: 15px; padding: 15px; background: rgba(100, 150, 255, 0.08); border-radius: 4px;">';
+      
+      const inflections = data.inflections.inflections;
+      const posKeys = Object.keys(inflections);
+      
+      posKeys.forEach(posKey => {
+        const posData = inflections[posKey];
+        const posInflections = posData.inflections;
+        const posLabel = translateGrammarLabel('pos', posKey);
+        
+        html += `<div style="margin-bottom: 15px;">`;
+        html += `<strong style="font-size: 13px; margin-bottom: 8px; display: block; color: var(--accent);">${posLabel}</strong>`;
+        
+        if (posKey === 'NOUN') {
+          html += renderNounInflections(posInflections);
+        } else if (posKey === 'VERB') {
+          html += renderVerbInflections(posInflections);
+        } else if (posKey === 'ADJF' || posKey === 'ADJS') {
+          html += renderAdjectiveInflections(posInflections);
+        } else if (posKey === 'NUMR' || posKey === 'NPRO') {
+          html += renderGenericInflections(posInflections);
+        } else {
+          html += renderGenericInflections(posInflections);
+        }
+        
+        html += '</div>';
+      });
+      
+      html += '</div>';
+    }
+    
+    // 显示词典释义
+    if (data.dictionary && data.dictionary.length > 0) {
+      html += '<div class="dictionary-entries">';
+      html += `<h4 style="margin-bottom: 10px;">📚 词典释义 (${data.dictionary.length} 个结果)</h4>`;
+      
+      data.dictionary.forEach((entry, index) => {
+        html += `<div style="margin: 10px 0; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 4px; border-left: 3px solid var(--primary);">`;
+        html += `<strong>${entry.word}</strong>`;
+        if (entry.pos) {
+          html += ` <span style="color: var(--muted); font-size: 11px;">(${entry.pos})</span>`;
+        }
+        if (entry.source) {
+          html += ` <span style="color: var(--secondary); font-size: 10px;">[${entry.source}]</span>`;
+        }
+        html += '<br>';
+        if (entry.translation) {
+          let translationText = entry.translation;
+          translationText = translationText.replace(/\\n/g, '\n');
+          const translationLines = translationText.split('\n');
+          html += '<div style="margin: 5px 0; color: var(--text); line-height: 1.8;">';
+          translationLines.forEach((line, lineIndex) => {
+            if (line.trim()) {
+              const trimmedLine = line.trim();
+              if (/^\d+\)/.test(trimmedLine)) {
+                html += `<div style="margin-top: 8px;">${trimmedLine}</div>`;
+              } else if (/^\s+\S/.test(line)) {
+                html += `<div style="margin-left: 20px;">${trimmedLine}</div>`;
+              } else {
+                html += `<div>${trimmedLine}</div>`;
+              }
+            }
+          });
+          html += '</div>';
+        }
+        if (entry.examples && entry.examples.length > 0) {
+          html += '<div style="margin: 5px 0; font-size: 13px; color: var(--muted);">';
+          html += '<strong>例句：</strong><br>';
+          entry.examples.forEach(example => {
+            html += `• ${example}<br>`;
+          });
+          html += '</div>';
+        }
+        if (entry.notes) {
+          html += `<div style="margin: 5px 0; font-size: 13px; color: var(--secondary);">${entry.notes}</div>`;
+        }
+        html += '</div>';
+      });
+      
+      html += '</div>';
+    } else {
+      html += '<p style="color: var(--muted);">未找到匹配的词典条目</p>';
+    }
+    
+    // 显示生词本记录
+    if (data.vocab) {
+      html += '<div style="margin-top: 15px; padding: 10px; background: rgba(100, 255, 100, 0.1); border-radius: 4px; border-left: 3px solid #4CAF50;">';
+      html += '<strong>📖 生词本记录：</strong><br>';
+      html += `<div><strong>释义：</strong>${data.vocab.meaning || '无'}</div>`;
+      if (data.vocab.note) {
+        html += `<div><strong>批注：</strong>${data.vocab.note}</div>`;
+      }
+      html += '</div>';
+    }
+    
+    resultsEl.innerHTML = html;
+    statsEl.innerHTML = `<p style="color: var(--muted); font-size: 12px;">搜索完成: ${new Date().toLocaleString()}</p>`;
+  }
+  
+  // 渲染名词变格形式
+  function renderNounInflections(inflections) {
+    let html = '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
+    
+    const numbers = Object.keys(inflections);
+    const cases = ['主格', '属格', '与格', '宾格', '工具格', '前置格'];
+    
+    html += '<tr style="background: rgba(255,255,255,0.1);">';
+    html += '<th style="padding: 6px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+    numbers.forEach(num => {
+      html += `<th style="padding: 6px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">${num}</th>`;
+    });
+    html += '</tr>';
+    
+    cases.forEach(caseName => {
+      html += '<tr>';
+      html += `<td style="padding: 6px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+      numbers.forEach(num => {
+        const value = inflections[num][caseName] || '-';
+        html += `<td style="padding: 6px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+      });
+      html += '</tr>';
+    });
+    
+    html += '</table>';
+    return html;
+  }
+  
+  // 渲染动词变格形式
+  function renderVerbInflections(inflections) {
+    let html = '';
+    
+    // 不定式
+    if (inflections['不定式']) {
+      html += `<div style="margin-bottom: 12px;">`;
+      html += `<strong style="color: var(--accent);">不定式:</strong> `;
+      html += `<span style="color: var(--primary);">${inflections['不定式']}</span>`;
+      html += `</div>`;
+    }
+    
+    // 主动语态
+    if (inflections['主动语态']) {
+      html += `<div style="margin-bottom: 12px;">`;
+      html += `<strong style="color: var(--accent);">主动语态</strong>`;
+      
+      const active = inflections['主动语态'];
+      
+      // 现在/将来时
+      if (active['现在/将来时']) {
+        html += `<div style="margin-left: 10px; margin-top: 8px;">`;
+        html += `<span style="font-size: 12px; color: var(--secondary); font-weight: bold;">现在/将来时</span>`;
+        html += `</div>`;
+        html += '<div style="overflow-x: auto; margin-top: 4px;">';
+        html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+        html += '<tr style="background: rgba(255,255,255,0.1);">';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">人称</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">单数</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+        html += '</tr>';
+        
+        const persons = ['一', '二', '三'];
+        const presentFuture = active['现在/将来时'];
+        
+        // 获取有数据的时态
+        const tenses = Object.keys(presentFuture).filter(tense => 
+          presentFuture[tense] && 
+          (presentFuture[tense]['单数'] || presentFuture[tense]['复数'])
+        );
+        
+        persons.forEach(person => {
+          html += '<tr>';
+          html += `<td style="padding: 4px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${person}</td>`;
+          
+          // 合并所有时态的单数和复数数据
+          let singValue = '-';
+          let plurValue = '-';
+          
+          for (const tense of tenses) {
+            const tenseData = presentFuture[tense];
+            if (tenseData && tenseData['单数'] && tenseData['单数'][person]) {
+              singValue = tenseData['单数'][person];
+            }
+            if (tenseData && tenseData['复数'] && tenseData['复数'][person]) {
+              plurValue = tenseData['复数'][person];
+            }
+          }
+          
+          html += `<td style="padding: 4px; text-align: left; border:1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${singValue}</td>`;
+          html += `<td style="padding: 4px; text-align: left; border:1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${plurValue}</td>`;
+          html += '</tr>';
+        });
+        
+        html += '</table>';
+        html += '</div>';
+      }
+      
+      // 过去时
+      if (active['过去时']) {
+        html += `<div style="margin-left: 10px; margin-top: 8px;">`;
+        html += `<span style="font-size: 12px; color: var(--secondary); font-weight: bold;">过去时</span>`;
+        html += `</div>`;
+        html += '<div style="overflow-x: auto; margin-top: 4px;">';
+        html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+        html += '<tr style="background: rgba(255,255,255,0.1);">';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">阳性</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">阴性</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">中性</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+        html += '</tr>';
+        
+        html += '<tr>';
+        const past = active['过去时'];
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${past['阳性'] || '-'}</td>`;
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${past['阴性'] || '-'}</td>`;
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${past['中性'] || '-'}</td>`;
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${past['复数'] || '-'}</td>`;
+        html += '</tr>';
+        
+        html += '</table>';
+        html += '</div>';
+      }
+      
+      // 副动词
+      if (active['副动词']) {
+        html += `<div style="margin-left: 10px; margin-top: 8px;">`;
+        html += `<span style="font-size: 12px; color: var(--secondary); font-weight: bold;">副动词</span>`;
+        html += `</div>`;
+        html += `<div style="margin-left: 10px; margin-top: 4px;">`;
+        html += `<span style="color: var(--primary); font-size: 14px;">${active['副动词']}</span>`;
+        html += `</div>`;
+      }
+      
+      // 命令式
+      if (active['命令式']) {
+        html += `<div style="margin-left: 10px; margin-top: 8px;">`;
+        html += `<span style="font-size: 12px; color: var(--secondary); font-weight: bold;">命令式</span>`;
+        html += `</div>`;
+        html += '<div style="overflow-x: auto; margin-top: 4px;">';
+        html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+        html += '<tr style="background: rgba(255,255,255,0.1);">';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">单数</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+        html += '</tr>';
+        
+        html += '<tr>';
+        const imperative = active['命令式'];
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${imperative['单数'] || '-'}</td>`;
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${imperative['复数'] || '-'}</td>`;
+        html += '</tr>';
+        
+        html += '</table>';
+        html += '</div>';
+      }
+      
+      // 过去时主动形动词
+      if (active['过去时主动形动词']) {
+        html += `<div style="margin-left: 10px; margin-top: 8px;">`;
+        html += `<span style="font-size: 12px; color: var(--secondary); font-weight: bold;">过去时主动形动词</span>`;
+        html += `</div>`;
+        
+        const participle = active['过去时主动形动词'];
+        const cases = ['一格', '二格', '三格', '四格', '五格', '六格'];
+        const genders = ['阳性', '阴性', '中性'];
+        
+        html += '<div style="overflow-x: auto; margin-top: 4px;">';
+        html += '<table style="width: 100%; border-collapse: collapse; font-size: 10px;">';
+        html += '<tr style="background: rgba(255,255,255,0.1);">';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">阳性</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">阴性</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">中性</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+        html += '</tr>';
+        
+        cases.forEach(caseName => {
+          html += '<tr>';
+          html += `<td style="padding: 3px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+          
+          const caseData = participle[caseName];
+          genders.forEach(gender => {
+            const value = caseData ? caseData[gender] || '-' : '-';
+            html += `<td style="padding: 3px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+          });
+          
+          const plurValue = caseData ? caseData['复数'] || '-' : '-';
+          html += `<td style="padding: 3px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${plurValue}</td>`;
+          html += '</tr>';
+        });
+        
+        html += '</table>';
+        html += '</div>';
+      }
+      
+      html += `</div>`;
+    }
+    
+    // 被动语态
+    if (inflections['被动语态']) {
+      html += `<div style="margin-bottom: 12px;">`;
+      html += `<strong style="color: var(--accent);">被动语态</strong>`;
+      
+      const passive = inflections['被动语态'];
+      
+      // 过去时被动形动词
+      if (passive['过去时被动形动词']) {
+        html += `<div style="margin-left: 10px; margin-top: 8px;">`;
+        html += `<span style="font-size: 12px; color: var(--secondary); font-weight: bold;">过去时被动形动词</span>`;
+        html += `</div>`;
+        
+        const participle = passive['过去时被动形动词'];
+        const cases = ['一格', '二格', '三格', '四格', '五格', '六格'];
+        const genders = ['阳性', '阴性', '中性'];
+        
+        html += '<div style="overflow-x: auto; margin-top: 4px;">';
+        html += '<table style="width: 100%; border-collapse: collapse; font-size: 10px;">';
+        html += '<tr style="background: rgba(255,255,255,0.1);">';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">阳性</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">阴性</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">中性</th>';
+        html += '<th style="padding: 3px; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+        html += '</tr>';
+        
+        cases.forEach(caseName => {
+          html += '<tr>';
+          html += `<td style="padding: 3px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+          
+          const caseData = participle[caseName];
+          genders.forEach(gender => {
+            const value = caseData ? caseData[gender] || '-' : '-';
+            html += `<td style="padding: 3px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+          });
+          
+          const plurValue = caseData ? caseData['复数'] || '-' : '-';
+          html += `<td style="padding: 3px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${plurValue}</td>`;
+          html += '</tr>';
+        });
+        
+        html += '</table>';
+        html += '</div>';
+      }
+      
+      // 简略形式
+      if (passive['简略形式']) {
+        html += `<div style="margin-left: 10px; margin-top: 8px;">`;
+        html += `<span style="font-size: 12px; color: var(--secondary); font-weight: bold;">简略形式</span>`;
+        html += `</div>`;
+        html += '<div style="overflow-x: auto; margin-top: 4px;">';
+        html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+        html += '<tr style="background: rgba(255,255,255,0.1);">';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">阳性</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">阴性</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">中性</th>';
+        html += '<th style="padding: 4px; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+        html += '</tr>';
+        
+        html += '<tr>';
+        const shortForm = passive['简略形式'];
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${shortForm['阳性'] || '-'}</td>`;
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${shortForm['阴性'] || '-'}</td>`;
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${shortForm['中性'] || '-'}</td>`;
+        html += `<td style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${shortForm['复数'] || '-'}</td>`;
+        html += '</tr>';
+        
+        html += '</table>';
+        html += '</div>';
+      }
+      
+      html += `</div>`;
+    }
+    
+    return html;
+  }
+  
+  // 渲染形容词变格形式
+  function renderAdjectiveInflections(inflections) {
+    let html = '<div style="overflow-x: auto;">';
+    html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+    
+    const numbers = Object.keys(inflections);
+    const cases = ['主格', '属格', '与格', '宾格', '工具格', '前置格'];
+    
+    if (numbers.includes('单数')) {
+      const genders = Object.keys(inflections['单数']);
+      
+      html += '<tr style="background: rgba(255,255,255,0.1);">';
+      html += '<th style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+      genders.forEach(gender => {
+        html += `<th style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">${gender}</th>`;
+      });
+      if (numbers.includes('复数')) {
+        html += '<th style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+      }
+      html += '</tr>';
+      
+      cases.forEach(caseName => {
+        html += '<tr>';
+        html += `<td style="padding: 4px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+        genders.forEach(gender => {
+          const value = inflections['单数'][gender][caseName] || '-';
+          html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+        });
+        if (numbers.includes('复数')) {
+          const value = inflections['复数'][caseName] || '-';
+          html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+        }
+        html += '</tr>';
+      });
+    } else if (numbers.includes('复数')) {
+      html += '<tr style="background: rgba(255,255,255,0.1);">';
+      html += '<th style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+      html += '<th style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+      html += '</tr>';
+      
+      cases.forEach(caseName => {
+        html += '<tr>';
+        html += `<td style="padding: 4px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+        const value = inflections['复数'][caseName] || '-';
+        html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+        html += '</tr>';
+      });
+    }
+    
+    html += '</table>';
+    html += '</div>';
+    
+    // 短尾形式
+    if (inflections['短尾形式']) {
+      html += '<div style="margin-top: 12px;">';
+      html += '<strong style="font-size: 12px; color: var(--secondary);">短尾形式</strong>';
+      html += '<div style="overflow-x: auto; margin-top: 4px;">';
+      html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+      html += '<tr style="background: rgba(255,255,255,0.1);">';
+      
+      const shortForms = inflections['短尾形式'];
+      const shortGenders = Object.keys(shortForms);
+      shortGenders.forEach(gender => {
+        html += `<th style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">${gender}</th>`;
+      });
+      html += '</tr>';
+      
+      html += '<tr>';
+      shortGenders.forEach(gender => {
+        const value = shortForms[gender] || '-';
+        html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+      });
+      html += '</tr>';
+      
+      html += '</table>';
+      html += '</div>';
+      html += '</div>';
+    }
+    
+    // 比较级
+    if (inflections['比较级']) {
+      html += '<div style="margin-top: 12px;">';
+      html += '<strong style="font-size: 12px; color: var(--secondary);">比较级</strong>';
+      html += `<div style="padding: 4px; margin-top: 4px; color: var(--primary); font-size: 14px;">${inflections['比较级']}</div>`;
+      html += '</div>';
+    }
+    
+    return html;
+  }
+  
+  // 渲染通用变格形式
+  function renderGenericInflections(inflections) {
+    let html = '<div style="overflow-x: auto;">';
+    html += '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
+    
+    const numbers = Object.keys(inflections);
+    
+    if (numbers.includes('单数') || numbers.includes('复数')) {
+      const cases = ['主格', '属格', '与格', '宾格', '工具格', '前置格'];
+      
+      html += '<tr style="background: rgba(255,255,255,0.1);">';
+      html += '<th style="padding: 6px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+      numbers.forEach(num => {
+        html += `<th style="padding: 6px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">${num}</th>`;
+      });
+      html += '</tr>';
+      
+      cases.forEach(caseName => {
+        html += '<tr>';
+        html += `<td style="padding: 6px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+        numbers.forEach(num => {
+          const value = inflections[num][caseName] || '-';
+          html += `<td style="padding: 6px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${value}</td>`;
+        });
+        html += '</tr>';
+      });
+    } else {
+      const keys = Object.keys(inflections);
+      keys.forEach(key => {
+        html += '<tr>';
+        html += `<td style="padding: 6px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${key}</td>`;
+        html += `<td style="padding: 6px; text-align: left; border: 1px solid rgba(255,255,255,0.2); color: var(--primary); font-size: 14px;">${inflections[key]}</td>`;
+        html += '</tr>';
+      });
+    }
+    
+    html += '</table>';
+    return html;
+  }
+  
+  // 绑定主要词典模块事件
+  if (mainSearchInput && mainSearchBtn) {
+    mainSearchBtn.addEventListener('click', () => {
+      performSearch(mainSearchInput.value, mainResults, mainStats);
+    });
+    
+    mainSearchInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        performSearch(mainSearchInput.value, mainResults, mainStats);
+      }
+    });
+    
+    if (mainClearBtn) {
+      mainClearBtn.addEventListener('click', () => {
+        mainSearchInput.value = '';
+        mainResults.innerHTML = '<p style="color: var(--muted);">请输入要搜索的单词或短语</p>';
+        mainStats.innerHTML = '';
+        mainSearchInput.focus();
+      });
+    }
+  }
+  
+  // 绑定阅读模式词典模块事件
+  if (readingSearchInput && readingSearchBtn) {
+    readingSearchBtn.addEventListener('click', () => {
+      performSearch(readingSearchInput.value, readingResults, readingStats);
+    });
+    
+    readingSearchInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        performSearch(readingSearchInput.value, readingResults, readingStats);
+      }
+    });
+    
+    if (readingClearBtn) {
+      readingClearBtn.addEventListener('click', () => {
+        readingSearchInput.value = '';
+        readingResults.innerHTML = '<p style="color: var(--muted);">请输入要搜索的单词或短语</p>';
+        readingStats.innerHTML = '';
+        readingSearchInput.focus();
+      });
+    }
+  }
+}
+
+// 页面加载完成后初始化词典搜索
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initDictionarySearch);
+} else {
+  initDictionarySearch();
+}
+
+// 本地文件系统同步功能
+let lastScanTime = 0;
+const SCAN_INTERVAL = 30000; // 30秒扫描一次
+
+// 扫描本地文件系统变化
+const scanLocalFiles = async () => {
+  try {
+    const response = await fetch('/api/media/scan');
+    
+    if (!response.ok) {
+      console.warn('扫描本地文件失败:', response.status, response.statusText);
+      return;
+    }
+    
+    const data = await response.json();
+    
+    if (data.status === 'success') {
+      const now = Date.now();
+      
+      // 比较扫描结果与当前播放列表
+      await syncPlaylistWithFileSystem(data.files, data.folders);
+      
+      lastScanTime = now;
+    }
+  } catch (e) {
+    console.warn('扫描本地文件失败:', e);
+  }
+};
+
+// 同步播放列表与文件系统
+const syncPlaylistWithFileSystem = async (files, folders) => {
+  // 构建当前播放列表中的文件和文件夹映射
+  const currentItems = new Map();
+  state.playlist.forEach((item, index) => {
+    currentItems.set(item.name, { ...item, index });
+  });
+  
+  // 构建文件系统中的文件和文件夹映射
+  const fsItems = new Map();
+  
+  // 添加文件夹
+  folders.forEach(folder => {
+    fsItems.set(folder, { type: 'folder', path: folder });
+  });
+  
+  // 添加文件
+  files.forEach(file => {
+    fsItems.set(file.path, { type: 'file', path: file.path, size: file.size, mtime: file.mtime });
+  });
+  
+  // 检查需要添加的项目
+  const itemsToAdd = [];
+  for (const [path, item] of fsItems) {
+    if (!currentItems.has(path)) {
+      itemsToAdd.push(item);
+    }
+  }
+  
+  // 检查需要删除的项目
+  const itemsToRemove = [];
+  for (const [name, item] of currentItems) {
+    if (!fsItems.has(name) && item.serverPath) {
+      itemsToRemove.push(item.index);
+    }
+  }
+  
+  // 处理删除操作（从后往前删除，避免索引变化）
+  itemsToRemove.sort((a, b) => b - a).forEach(index => {
+    if (state.playlist[index]) {
+      if (state.playlist[index].url) {
+        URL.revokeObjectURL(state.playlist[index].url);
+      }
+      state.playlist.splice(index, 1);
+      
+      // 调整当前播放索引
+      if (state.currentPlaylistIndex === index) {
+        state.currentPlaylistIndex = -1;
+        $("#player").src = "";
+      } else if (state.currentPlaylistIndex > index) {
+        state.currentPlaylistIndex -= 1;
+      }
+    }
+  });
+  
+  // 处理添加操作
+  for (const item of itemsToAdd) {
+    if (item.type === 'folder') {
+      // 添加文件夹
+      state.playlist.push({
+        name: item.path,
+        url: null,
+        file: null,
+        type: 'folder',
+        serverPath: item.path
+      });
+    } else if (item.type === 'file') {
+      // 添加文件
+      // 直接添加文件路径，不在同步时加载文件内容
+      // 播放时再通过serverPath请求文件
+      state.playlist.push({
+        name: item.path,
+        url: `/api/media/load/${item.path}`,
+        file: null,
+        serverPath: item.path
+      });
+      
+      console.log(`文件 ${item.path} 已添加到播放列表`);
+    }
+  }
+  
+  // 如果有变化，保存并重新渲染
+  if (itemsToAdd.length > 0 || itemsToRemove.length > 0) {
+    renderPlaylist();
+  }
+};
+
+// 启动定期扫描
+const startFileScanInterval = () => {
+  // 立即执行一次扫描
+  scanLocalFiles();
+  
+  // 设置定期扫描
+  setInterval(scanLocalFiles, SCAN_INTERVAL);
+};
+
+// 启动文件扫描
+startFileScanInterval();
+
+const addToPlaylist = async (files, basePath = '') => {
+  for (const file of files) {
+    if (file.isDirectory) {
+      // 处理文件夹
+      const folderName = basePath + file.name + '/';
+      
+      // 在服务器创建真实文件夹
+      try {
+        const response = await fetch('/api/playlist/create-folder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folder_name: basePath + file.name })
+        });
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+          // 创建成功后，重新从真实文件夹加载播放列表
+          await loadPlaylist();
+        } else {
+          alert(`创建文件夹失败: ${data.error || '未知错误'}`);
+        }
+      } catch (e) {
+        console.error('创建文件夹失败:', e);
+        alert(`创建文件夹失败: ${e.message || '网络错误'}`);
+      }
+      
+      // 递归处理文件夹内容
+      if (file.webkitGetAsEntry) {
+        const entry = file.webkitGetAsEntry();
+        await processDirectoryEntry(entry, folderName);
+      }
+    } else {
+      // 处理文件
+      const fileName = basePath + file.name;
+      const url = URL.createObjectURL(file);
+      let serverPath = null;
+
+      // 先添加到播放列表并渲染，让用户立即看到
+      state.playlist.push({
+        name: fileName,
+        url: url,
+        file: file,
+        serverPath: null
+      });
+      
+      renderPlaylist();
+
+      // 上传文件到服务器（失败会提示刷新后丢失）
+      try {
+        const formData = new FormData();
+        formData.append('media', file);
+        formData.append('path', basePath);
+        const response = await fetch('/api/media/upload', {
+          method: 'POST',
+          body: formData
+        });
+        // 尝试解析 JSON，失败则回退文本
+        let data = null;
+        let errText = "";
+        try {
+          data = await response.json();
+        } catch (e) {
+          errText = await response.text();
+        }
+
+        if (!response.ok || !data || data.status !== 'success') {
+          const msg = (data && data.error) || errText || `上传失败 (HTTP ${response.status})`;
+          alert(`上传失败，刷新后会丢失：${fileName}\n原因：${msg}`);
+          console.warn(`⚠ 上传失败: ${fileName} — ${msg}`);
+        } else {
+          serverPath = data.filename || fileName;
+          console.log(`✓ 文件已上传到服务器: ${fileName}`);
+          
+          // 更新播放列表中的 serverPath
+          const item = state.playlist.find(item => item.name === fileName);
+          if (item) {
+            item.serverPath = serverPath;
+          }
+          
+          // 上传成功后，重新从真实文件夹加载播放列表
+          await loadPlaylist();
+        }
+      } catch (e) {
+        alert(`上传失败，刷新后会丢失：${fileName}`);
+        console.error(`✗ 上传失败: ${fileName}`, e);
+      }
+    }
+  }
+};
+
+// 处理目录条目
+const processDirectoryEntry = async (entry, basePath) => {
+  return new Promise((resolve, reject) => {
+    const reader = entry.createReader();
+    const readEntries = () => {
+      reader.readEntries(async (entries) => {
+        if (entries.length === 0) {
+          resolve();
+        } else {
+          for (const entry of entries) {
+            if (entry.isDirectory) {
+              const folderName = basePath + entry.name + '/';
+              
+              // 在服务器创建真实文件夹
+              try {
+                const response = await fetch('/api/playlist/create-folder', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ folder_name: basePath + entry.name })
+                });
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                  // 创建成功后，重新从真实文件夹加载播放列表
+                  await loadPlaylist();
+                } else {
+                  console.warn(`创建文件夹失败: ${data.error}`);
+                }
+              } catch (e) {
+                console.error('创建文件夹失败:', e);
+              }
+              
+              await processDirectoryEntry(entry, folderName);
+            } else {
+              await new Promise((resolveFile) => {
+                entry.file(async (file) => {
+                  const fileName = basePath + file.name;
+                  const url = URL.createObjectURL(file);
+                  let serverPath = null;
+
+                  // 先添加到播放列表并渲染
+                  state.playlist.push({
+                    name: fileName,
+                    url: url,
+                    file: file,
+                    serverPath: null
+                  });
+                  
+                  renderPlaylist();
+
+                  // 上传文件到服务器
+                  try {
+                    const formData = new FormData();
+                    formData.append('media', file);
+                    formData.append('path', basePath);
+                    const response = await fetch('/api/media/upload', {
+                      method: 'POST',
+                      body: formData
+                    });
+                    let data = null;
+                    try {
+                      data = await response.json();
+                    } catch (e) {
+                      // 忽略解析错误
+                    }
+
+                    if (response.ok && data && data.status === 'success') {
+                      serverPath = data.filename || fileName;
+                      console.log(`✓ 文件已上传到服务器: ${fileName}`);
+                      
+                      // 上传成功后，重新从真实文件夹加载播放列表
+                      await loadPlaylist();
+                    }
+                  } catch (e) {
+                    console.error(`✗ 上传失败: ${fileName}`, e);
+                  }
+
+                  resolveFile();
+                });
+              });
+            }
+          }
+          readEntries();
+        }
+      }, reject);
+    };
+    readEntries();
+  });
+};
+
+const removeFromPlaylist = async (index) => {
+  if (state.playlist[index]) {
+    // 保存历史状态
+    savePlaylistHistory();
+    
+    const item = state.playlist[index];
+    
+    try {
+      const response = await fetch('/api/media/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: item.name })
+      });
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        URL.revokeObjectURL(item.url);
+        state.playlist.splice(index, 1);
+        
+        if (state.currentPlaylistIndex === index) {
+          state.currentPlaylistIndex = -1;
+          $("#player").src = "";
+        } else if (state.currentPlaylistIndex > index) {
+          state.currentPlaylistIndex -= 1;
+        }
+        
+        await loadPlaylist();
+      } else {
+        alert(`删除失败: ${data.error || '未知错误'}`);
       }
     } catch (e) {
-      alert(`上传失败，刷新后会丢失：${file.name}`);
-      console.error(`✗ 上传失败: ${file.name}`, e);
+      console.error('删除失败:', e);
+      alert(`删除失败: ${e.message || '网络错误'}`);
     }
-
-    state.playlist.push({
-      name: file.name,
-      url: url,
-      file: file,
-      serverPath
-    });
-  }
-  persistPlaylists();
-  renderPlaylist();
-};
-
-const removeFromPlaylist = (index) => {
-  if (state.playlist[index]) {
-    URL.revokeObjectURL(state.playlist[index].url);
-    state.playlist.splice(index, 1);
-    if (state.currentPlaylistIndex === index) {
-      state.currentPlaylistIndex = -1;
-      $("#player").src = "";
-    }
-    persistPlaylists();
-    renderPlaylist();
   }
 };
 
-const clearPlaylist = () => {
+const clearPlaylist = async () => {
   if (confirm("确定要清空播放列表吗？")) {
-    state.playlist.forEach(item => URL.revokeObjectURL(item.url));
-    state.playlist = [];
-    state.currentPlaylistIndex = -1;
-    $("#player").src = "";
-    state.mediaTitle = "";
-    updateMediaName();
-    persistPlaylists();
-    renderPlaylist();
+    try {
+      const response = await fetch('/api/media/clear', {
+        method: 'POST'
+      });
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        state.playlist = [];
+        state.currentPlaylistIndex = -1;
+        $("#player").src = "";
+        state.mediaTitle = "";
+        updateMediaName();
+        renderPlaylist();
+      } else {
+        alert(`清空播放列表失败: ${data.error || '未知错误'}`);
+      }
+    } catch (e) {
+      console.error('清空播放列表失败:', e);
+      alert(`清空播放列表失败: ${e.message || '网络错误'}`);
+    }
   }
 };
 
-const reorderPlaylist = (from, to) => {
+const reorderPlaylist = (from, to, insertBefore = false) => {
   if (from === to) return;
   if (from < 0 || to < 0) return;
   if (from >= state.playlist.length || to >= state.playlist.length) return;
 
+  // 保存历史状态
+  savePlaylistHistory();
+
   const [moved] = state.playlist.splice(from, 1);
-  state.playlist.splice(to, 0, moved);
+  
+  // 根据插入位置调整目标索引
+  let targetIndex = to;
+  if (insertBefore) {
+    // 如果是从后往前拖，插入到目标位置之前
+    if (from < to) {
+      targetIndex = to - 1;
+    }
+  } else {
+    // 如果是从前往后拖，插入到目标位置之后
+    if (from > to) {
+      targetIndex = to + 1;
+    }
+  }
+  
+  // 确保目标索引在有效范围内
+  targetIndex = Math.max(0, Math.min(targetIndex, state.playlist.length));
+  
+  state.playlist.splice(targetIndex, 0, moved);
 
   // 调整当前播放索引，保证当前播放项随位置变化
   if (state.currentPlaylistIndex === from) {
-    state.currentPlaylistIndex = to;
-  } else if (state.currentPlaylistIndex > from && state.currentPlaylistIndex <= to) {
+    state.currentPlaylistIndex = targetIndex;
+  } else if (state.currentPlaylistIndex > from && state.currentPlaylistIndex <= targetIndex) {
     state.currentPlaylistIndex -= 1;
-  } else if (state.currentPlaylistIndex < from && state.currentPlaylistIndex >= to) {
+  } else if (state.currentPlaylistIndex < from && state.currentPlaylistIndex >= targetIndex) {
     state.currentPlaylistIndex += 1;
   }
 
-  persistPlaylists();
+  renderPlaylist();
+};
+
+const reorderMultiplePlaylistItems = (indices, to, insertBefore = false) => {
+  if (!indices || indices.length === 0) return;
+  
+  // 保存历史状态
+  savePlaylistHistory();
+  
+  // 排序索引，从大到小处理，避免索引变化
+  const sortedIndices = [...indices].sort((a, b) => b - a);
+  
+  // 提取所有要移动的项目
+  const items = sortedIndices.map(idx => state.playlist[idx]);
+  
+  // 从原位置移除
+  sortedIndices.forEach(idx => {
+    state.playlist.splice(idx, 1);
+  });
+  
+  // 计算目标索引
+  let targetIndex = to;
+  if (insertBefore) {
+    targetIndex = Math.max(0, to - indices.length);
+  }
+  
+  // 确保目标索引在有效范围内
+  targetIndex = Math.max(0, Math.min(targetIndex, state.playlist.length));
+  
+  // 插入到目标位置
+  items.reverse().forEach(item => {
+    state.playlist.splice(targetIndex, 0, item);
+  });
+  
+  // 清除选择
+  state.selectedPlaylistIndices = [];
+  
   renderPlaylist();
 };
 
@@ -1165,12 +2237,19 @@ const playlistItem = async (index) => {
     updateMediaName();
     updatePlayerMediaMode(guessIsAudio(item.name));
     const player = $("#player");
-    player.src = item.url;
+    
+    // 如果有本地 URL，直接使用
+    if (item.url) {
+      player.src = item.url;
+    } else if (item.serverPath) {
+      // 否则从服务器加载
+      player.src = `/api/media/load/${encodeURIComponent(item.serverPath)}`;
+    }
     
     // 手动加载波形图
     if (playerWavesurfer) {
       try {
-        await playerWavesurfer.load(item.url);
+        await playerWavesurfer.load(player.src);
         logEvent("waveformLoaded", { file: item.name });
       } catch (e) {
         console.error("波形图加载失败:", e);
@@ -1195,96 +2274,12 @@ const playlistItem = async (index) => {
     }
     
     renderSubtitles();
-    renderWaveformRegions(); // 渲染波形图字幕区域
+    renderWaveformRegions();
     renderPlaylist();
   }
 };
 
-const renderPlaylistSelector = () => {
-  const container = $("#playlist-selector");
-  if (!container) return;
-  
-  if (state.playlists.length === 0) return;
-  
-  // 清空容器
-  container.innerHTML = "";
-  
-  // 创建选择器容器
-  const selector = document.createElement("div");
-  selector.className = "playlist-selector-wrapper";
-  
-  // 添加标签
-  const label = document.createElement("span");
-  label.style.fontSize = "11px";
-  label.style.color = "var(--muted)";
-  label.style.marginRight = "8px";
-  label.textContent = "播放列表:";
-  selector.appendChild(label);
-  
-  // 添加下拉框
-  const select = document.createElement("select");
-  select.className = "playlist-select";
-  select.style.flex = "1";
-  select.style.minWidth = "100px";
-  
-  state.playlists.forEach(pl => {
-    const option = document.createElement("option");
-    option.value = pl.id;
-    option.textContent = pl.name;
-    option.selected = pl.id === state.currentPlaylistId;
-    select.appendChild(option);
-  });
-  
-  select.addEventListener("change", (e) => {
-    switchPlaylist(e.target.value);
-  });
-  selector.appendChild(select);
-  
-  // 添加操作按钮
-  const buttonGroup = document.createElement("div");
-  buttonGroup.style.display = "flex";
-  buttonGroup.style.gap = "4px";
-  
-  // 新建按钮
-  const btnNew = document.createElement("button");
-  btnNew.className = "mini-btn";
-  btnNew.title = "新建播放列表";
-  btnNew.textContent = "➕ 新建";
-  btnNew.addEventListener("click", () => {
-    const name = prompt("请输入播放列表名称:", "新播放列表");
-    if (name && name.trim()) {
-      createPlaylist(name.trim());
-    }
-  });
-  buttonGroup.appendChild(btnNew);
-  
-  // 重命名按钮
-  const btnRename = document.createElement("button");
-  btnRename.className = "mini-btn";
-  btnRename.title = "重命名当前播放列表";
-  btnRename.textContent = "✎ 重命名";
-  btnRename.addEventListener("click", () => {
-    if (state.currentPlaylistId) {
-      renamePlaylist(state.currentPlaylistId);
-    }
-  });
-  buttonGroup.appendChild(btnRename);
-  
-  // 删除按钮
-  const btnDelete = document.createElement("button");
-  btnDelete.className = "mini-btn danger-text";
-  btnDelete.title = "删除当前播放列表";
-  btnDelete.textContent = "🗑️ 删除";
-  btnDelete.addEventListener("click", () => {
-    if (state.currentPlaylistId) {
-      deletePlaylist(state.currentPlaylistId);
-    }
-  });
-  buttonGroup.appendChild(btnDelete);
-  
-  selector.appendChild(buttonGroup);
-  container.appendChild(selector);
-};
+
 
 const renderPlaylist = () => {
   const playlistEl = $("#playlist");
@@ -1295,130 +2290,948 @@ const renderPlaylist = () => {
     return;
   }
   
-  // 容器级拖放：允许拖到空白处（放到末尾）
-  if (!playlistEl.dataset.dragBound) {
-    playlistEl.addEventListener("dragstart", (e) => {
-      const item = e.target.closest(".playlist-item");
-      if (!item) return;
-      const idx = Array.prototype.indexOf.call(playlistEl.children, item);
-      playlistDragIndex = idx;
-      isPlaylistDragging = true;
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.dropEffect = "move";
-      e.dataTransfer.setData("text/plain", String(idx));
-      item.classList.add("dragging");
-    });
-    playlistEl.addEventListener("dragenter", (e) => {
-      if (playlistDragIndex === null) return;
-      e.preventDefault();
-    });
-    playlistEl.addEventListener("dragover", (e) => {
-      if (playlistDragIndex === null) return;
-      e.preventDefault();
-      e.stopPropagation();
-      e.dataTransfer.dropEffect = "move";
-      playlistEl.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
-      const targetItem = e.target.closest(".playlist-item");
-      if (targetItem) targetItem.classList.add("drag-over");
-    });
-    playlistEl.addEventListener("drop", (e) => {
-      if (playlistDragIndex === null) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const sourceIndex = playlistDragIndex ?? Number(e.dataTransfer.getData("text/plain"));
-      const targetItem = e.target.closest(".playlist-item");
-      const targetIndex = targetItem
-        ? Array.prototype.indexOf.call(playlistEl.children, targetItem)
-        : state.playlist.length - 1;
-      playlistEl.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
-      playlistDragIndex = null;
-      isPlaylistDragging = false;
-      if (Number.isInteger(sourceIndex) && Number.isInteger(targetIndex)) {
-        reorderPlaylist(sourceIndex, targetIndex);
-      }
-    });
-    playlistEl.addEventListener("dragend", (e) => {
-      const item = e.target.closest(".playlist-item");
-      playlistDragIndex = null;
-      isPlaylistDragging = false;
-      if (item) item.classList.remove("dragging");
-      playlistEl.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
-    });
-    playlistEl.dataset.dragBound = "1";
+  // 更新播放列表标题，显示长度
+  const playlistTitle = document.querySelector("#playlist-title");
+  if (playlistTitle) {
+    playlistTitle.textContent = `播放列表 (${state.playlist.length})`;
   }
-
+  
+  // 构建树形结构
+  const treeData = buildPlaylistTree(state.playlist);
+  
+  // 渲染树形结构
   playlistEl.innerHTML = "";
+  renderTreeNode(playlistEl, treeData, "playlist");
+  
+  // 绑定拖放事件
+  bindPlaylistDragDrop(playlistEl);
+  
+  // 绑定右键菜单事件
+  bindPlaylistContextMenu(playlistEl);
+};
 
-  state.playlist.forEach((item, idx) => {
-    const wrapper = createEl("div", `playlist-item ${idx === state.currentPlaylistIndex ? 'active' : ''}`);
-    wrapper.draggable = true;
-    wrapper.dataset.index = idx.toString();
-
-    const handle = createEl("span", "playlist-item-handle");
-    handle.textContent = "::";
-    handle.draggable = true;
-
-    const name = createEl("span", "playlist-item-name");
-    name.title = item.name;
-    name.textContent = item.name;
-    name.draggable = true;
-
-    const removeBtn = createEl("button", "playlist-item-remove");
-    removeBtn.textContent = "删除";
-    removeBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      removeFromPlaylist(idx);
-    });
-
-    wrapper.appendChild(handle);
-    wrapper.appendChild(name);
-    wrapper.appendChild(removeBtn);
-
-    wrapper.addEventListener("click", () => playlistItem(idx));
-
-    // 冗余绑定（wrapper 与 handle/name 都可触发），避免某些浏览器/元素不触发冒泡 dragstart
-    const onDragStart = (e) => {
-      playlistDragIndex = idx;
-      isPlaylistDragging = true;
-      if (e.dataTransfer) {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.dropEffect = "move";
-        e.dataTransfer.setData("text/plain", String(idx));
-      }
-      wrapper.classList.add("dragging");
-    };
-    wrapper.addEventListener("dragstart", onDragStart);
-    handle.addEventListener("dragstart", onDragStart);
-    name.addEventListener("dragstart", onDragStart);
-
-    const onDragOver = (e) => {
-      if (playlistDragIndex === null) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-      wrapper.classList.add("drag-over");
-    };
-    wrapper.addEventListener("dragover", onDragOver);
-    wrapper.addEventListener("dragenter", onDragOver);
-
-    wrapper.addEventListener("dragleave", () => {
-      wrapper.classList.remove("drag-over");
-    });
-
-    wrapper.addEventListener("drop", (e) => {
-      if (playlistDragIndex === null) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const sourceIndex = playlistDragIndex;
-      const targetIndex = Array.prototype.indexOf.call(playlistEl.children, wrapper);
-      wrapper.classList.remove("drag-over");
-      playlistDragIndex = null;
-      isPlaylistDragging = false;
-      reorderPlaylist(sourceIndex, targetIndex);
-    });
-
-    playlistEl.appendChild(wrapper);
+const buildPlaylistTree = (items) => {
+  const tree = { children: [], name: "root", type: "folder" };
+  
+  // 支持的文件格式
+  const audioExts = ["mp3", "wav", "ogg", "flac", "aac", "m4a"];
+  const videoExts = ["mp4", "avi", "mkv", "mov", "wmv", "flv"];
+  const supportedExts = [...audioExts, ...videoExts];
+  
+  // 过滤只显示支持的格式
+  const filteredItems = items.filter(item => {
+    if (item.type === "folder") return true;
+    const ext = item.name.split(".").pop().toLowerCase();
+    return supportedExts.includes(ext);
   });
+  
+  // 按名称排序（文件夹在前，文件在后）
+  const sortedItems = [...filteredItems].sort((a, b) => {
+    const aIsFolder = a.type === "folder";
+    const bIsFolder = b.type === "folder";
+    
+    // 文件夹在前
+    if (aIsFolder && !bIsFolder) return -1;
+    if (!aIsFolder && bIsFolder) return 1;
+    
+    // 同类型按名称排序
+    const aName = (a.name || "").toLowerCase();
+    const bName = (b.name || "").toLowerCase();
+    return aName.localeCompare(bName);
+  });
+  
+  sortedItems.forEach((item, idx) => {
+    const name = item.name || "";
+    const parts = name.split(/[\\/]/).filter(part => part !== "");
+    
+    if (parts.length === 0) return;
+    
+    let currentNode = tree;
+    let currentPath = "";
+    
+    parts.forEach((part, partIndex) => {
+      const isFile = partIndex === parts.length - 1 && item.type !== "folder";
+      
+      if (isFile) {
+        currentNode.children.push({
+          name: part,
+          type: "file",
+          index: items.indexOf(item),
+          item: item
+        });
+      } else {
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        
+        let folderNode = currentNode.children.find(
+          child => child.type === "folder" && child.name === part
+        );
+        
+        if (!folderNode) {
+          folderNode = {
+            name: part,
+            type: "folder",
+            path: currentPath,
+            children: [],
+            expanded: state.folderExpandedStates[currentPath] || false
+          };
+          currentNode.children.push(folderNode);
+        }
+        
+        currentNode = folderNode;
+      }
+    });
+  });
+  
+  return tree.children;
+};
+
+const renderTreeNode = (container, nodes, type, level = 0) => {
+  nodes.forEach(node => {
+    const nodeEl = createEl("div", "tree-node");
+    nodeEl.style.marginLeft = `${level * 16}px`;
+    
+    const contentEl = createEl("div", "tree-node-content");
+    contentEl.draggable = true;
+    
+    if (node.type === "folder") {
+      const toggleEl = createEl("span", `tree-toggle ${node.expanded ? "expanded" : ""}`);
+      toggleEl.textContent = "▶";
+      toggleEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleFolder(node, toggleEl, childrenEl);
+      });
+      
+      const dragHandleEl = createEl("span", "tree-drag-handle");
+      dragHandleEl.textContent = "⋮⋮";
+      dragHandleEl.title = "拖拽排序";
+      dragHandleEl.draggable = true;
+      
+      const iconEl = createEl("span", "tree-node-icon");
+      iconEl.textContent = "📁";
+      
+      const labelEl = createEl("span", "tree-node-label");
+      labelEl.textContent = node.name;
+      
+      const metaEl = createEl("span", "tree-node-meta");
+      const fileCount = countFiles(node);
+      metaEl.textContent = `(${fileCount})`;
+      
+      contentEl.appendChild(toggleEl);
+      contentEl.appendChild(dragHandleEl);
+      contentEl.appendChild(iconEl);
+      contentEl.appendChild(labelEl);
+      contentEl.appendChild(metaEl);
+      
+      nodeEl.appendChild(contentEl);
+      nodeEl.dataset.folderName = node.name;
+      
+      // 检查是否需要固定标题栏（子项目数量超过10个）
+      const childCount = countFiles(node);
+      const needsStickyHeader = childCount > 10;
+      
+      // 如果需要固定标题栏，创建一个独立的容器
+      let childrenEl;
+      if (needsStickyHeader) {
+        nodeEl.classList.add("sticky-header");
+        const stickyContainer = createEl("div", "tree-node-sticky-container");
+        stickyContainer.appendChild(contentEl);
+        nodeEl.appendChild(stickyContainer);
+        
+        childrenEl = createEl("div", `tree-node-children ${node.expanded ? "expanded" : "collapsed"} has-sticky-header`);
+        renderTreeNode(childrenEl, node.children, type, level + 1);
+        nodeEl.appendChild(childrenEl);
+      } else {
+        nodeEl.appendChild(contentEl);
+        
+        childrenEl = createEl("div", `tree-node-children ${node.expanded ? "expanded" : "collapsed"}`);
+        renderTreeNode(childrenEl, node.children, type, level + 1);
+        nodeEl.appendChild(childrenEl);
+      }
+      
+      contentEl.addEventListener("click", () => {
+        toggleFolder(node, toggleEl, childrenEl);
+      });
+    } else {
+      const toggleEl = createEl("span", "tree-toggle invisible");
+      toggleEl.textContent = "▶";
+      
+      const dragHandleEl = createEl("span", "tree-drag-handle");
+      dragHandleEl.textContent = "⋮⋮";
+      dragHandleEl.title = "拖拽排序";
+      
+      const iconEl = createEl("span", "tree-node-icon");
+      iconEl.textContent = getFileIcon(node.name);
+      
+      const labelEl = createEl("span", "tree-node-label");
+      labelEl.textContent = node.name;
+      labelEl.title = node.name;
+      
+      let isActive = false;
+      let isSelected = false;
+      if (type === "playlist") {
+        isActive = node.index === state.currentPlaylistIndex;
+        isSelected = state.selectedPlaylistIndices.includes(node.index);
+        contentEl.dataset.index = node.index;
+      } else if (type === "documents") {
+        isActive = node.docId === readingState.currentDocId;
+        contentEl.dataset.docId = node.docId;
+        
+        const metaEl = createEl("span", "tree-node-meta");
+        const doc = node.doc;
+        metaEl.textContent = `${doc.totalWords || doc.charCount || 0} 词 · ${doc.charCount || 0} 字`;
+        contentEl.appendChild(metaEl);
+        
+        const progressPercent = doc.readProgress?.pagePercent || doc.readProgress?.scrollPercent || 0;
+        if (progressPercent > 0) {
+          const progressText = createEl("span", "tree-node-meta");
+          progressText.textContent = ` · 进度 ${Math.round(progressPercent)}%`;
+          contentEl.appendChild(progressText);
+          
+          const progressBar = createEl("div", "tree-progress-bar");
+          progressBar.style.width = `${progressPercent}%`;
+          contentEl.appendChild(progressBar);
+        }
+      }
+      
+      contentEl.classList.toggle("active", isActive);
+      contentEl.classList.toggle("selected", isSelected);
+      contentEl.appendChild(toggleEl);
+      contentEl.appendChild(dragHandleEl);
+      contentEl.appendChild(iconEl);
+      contentEl.appendChild(labelEl);
+      
+      nodeEl.appendChild(contentEl);
+      
+      contentEl.addEventListener("click", (e) => {
+        if (type === "playlist") {
+          handlePlaylistItemClick(e, node.index);
+        } else if (type === "documents") {
+          loadReadingDocument(node.docId);
+        }
+      });
+    }
+    
+    container.appendChild(nodeEl);
+  });
+};
+
+const handlePlaylistItemClick = (e, index) => {
+  if (e.ctrlKey || e.metaKey) {
+    e.stopPropagation();
+    
+    if (state.selectedPlaylistIndices.includes(index)) {
+      state.selectedPlaylistIndices = state.selectedPlaylistIndices.filter(i => i !== index);
+    } else {
+      state.selectedPlaylistIndices.push(index);
+    }
+    
+    state.lastClickedIndex = index;
+    renderPlaylist();
+  } else if (e.shiftKey) {
+    e.stopPropagation();
+    
+    const start = Math.min(state.lastClickedIndex, index);
+    const end = Math.max(state.lastClickedIndex, index);
+    
+    state.selectedPlaylistIndices = [];
+    for (let i = start; i <= end; i++) {
+      if (state.playlist[i]) {
+        state.selectedPlaylistIndices.push(i);
+      }
+    }
+    
+    state.lastClickedIndex = index;
+    renderPlaylist();
+  } else {
+    state.selectedPlaylistIndices = [];
+    state.lastClickedIndex = index;
+    playlistItem(index);
+  }
+};
+
+const toggleFolder = (node, toggleEl, childrenEl) => {
+  node.expanded = !node.expanded;
+  toggleEl.classList.toggle("expanded", node.expanded);
+  childrenEl.classList.toggle("expanded", node.expanded);
+  childrenEl.classList.toggle("collapsed", !node.expanded);
+  
+  // 保存文件夹展开状态
+  if (node.path) {
+    state.folderExpandedStates[node.path] = node.expanded;
+  }
+};
+
+const countFiles = (node) => {
+  if (node.type === "file") return 1;
+  return node.children.reduce((sum, child) => sum + countFiles(child), 0);
+};
+
+const getFileIcon = (filename) => {
+  const ext = filename.split(".").pop().toLowerCase();
+  const audioExts = ["mp3", "wav", "ogg", "flac", "aac", "m4a"];
+  const videoExts = ["mp4", "avi", "mkv", "mov", "wmv", "flv"];
+  const docExts = ["pdf", "epub", "txt", "doc", "docx", "md"];
+  
+  if (audioExts.includes(ext)) return "🎵";
+  if (videoExts.includes(ext)) return "🎬";
+  if (docExts.includes(ext)) return "📄";
+  return "📄";
+};
+
+const bindPlaylistDragDrop = (playlistEl) => {
+  if (playlistEl.dataset.treeDragBound) return;
+  
+  // 内部拖拽排序
+  playlistEl.addEventListener("dragstart", (e) => {
+    const contentEl = e.target.closest(".tree-node-content");
+    if (!contentEl) return;
+    
+    const idx = contentEl?.dataset.index;
+    if (idx === undefined || idx === null) return;
+    
+    // 检查是否有选中的项目
+    if (state.selectedPlaylistIndices.length > 0 && state.selectedPlaylistIndices.includes(parseInt(idx))) {
+      // 拖拽所有选中的项目
+      playlistDragIndices = [...state.selectedPlaylistIndices];
+    } else {
+      // 只拖拽当前点击的项目
+      playlistDragIndices = [parseInt(idx)];
+    }
+    
+    playlistDragIndex = parseInt(idx);
+    isPlaylistDragging = true;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.dropEffect = "move";
+    
+    // 设置拖拽数据（包含所有选中的索引）
+    e.dataTransfer.setData("application/x-playlist-drag", JSON.stringify(playlistDragIndices));
+    e.dataTransfer.setData("text/plain", idx);
+    
+    // 为所有拖拽的项目添加样式
+    playlistDragIndices.forEach(dragIdx => {
+      const dragContentEl = playlistEl.querySelector(`.tree-node-content[data-index="${dragIdx}"]`);
+      if (dragContentEl) {
+        const dragNodeEl = dragContentEl.closest(".tree-node");
+        if (dragNodeEl) {
+          dragNodeEl.classList.add("dragging");
+        }
+      }
+    });
+    
+    playlistEl.classList.add("dragging-active");
+  });
+  
+  // 外部文件/文件夹拖拽导入
+  playlistEl.addEventListener("dragover", (e) => {
+    // 检查是否是外部文件拖拽
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "copy";
+      playlistEl.classList.add("drag-over-drop");
+      return;
+    }
+    
+    // 内部拖拽处理
+    if (playlistDragIndices.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+    
+    // 清除所有拖拽高亮
+    playlistEl.querySelectorAll(".drag-over-before").forEach(el => el.classList.remove("drag-over-before"));
+    playlistEl.querySelectorAll(".drag-over-after").forEach(el => el.classList.remove("drag-over-after"));
+    playlistEl.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+    
+    const targetContent = e.target.closest(".tree-node-content");
+    const targetNode = e.target.closest(".tree-node");
+    
+    // 检查是否拖到文件夹上
+    if (targetNode && targetNode.dataset.folderName) {
+      targetContent.classList.add("drag-over-folder");
+      return;
+    }
+    
+    if (targetContent && targetContent.dataset.index !== undefined) {
+      const targetIndex = parseInt(targetContent.dataset.index);
+      
+      // 不允许拖拽到自己身上（单选或多选）
+      if (playlistDragIndices.includes(targetIndex)) return;
+      
+      // 计算鼠标在目标元素上的相对位置
+      const rect = targetContent.getBoundingClientRect();
+      const relativeY = e.clientY - rect.top;
+      const isUpperHalf = relativeY < rect.height / 2;
+      
+      // 根据位置添加相应的样式类
+      if (isUpperHalf) {
+        targetContent.classList.add("drag-over-before");
+      } else {
+        targetContent.classList.add("drag-over-after");
+      }
+    }
+  });
+  
+  playlistEl.addEventListener("dragenter", (e) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      playlistEl.classList.add("drag-over-drop");
+    } else if (playlistDragIndex === null) {
+      return;
+    } else {
+      e.preventDefault();
+    }
+  });
+  
+  playlistEl.addEventListener("dragleave", (e) => {
+    playlistEl.classList.remove("drag-over-drop");
+    playlistEl.querySelectorAll(".drag-over-before").forEach(el => el.classList.remove("drag-over-before"));
+    playlistEl.querySelectorAll(".drag-over-after").forEach(el => el.classList.remove("drag-over-after"));
+  });
+  
+  playlistEl.addEventListener("drop", async (e) => {
+    // 处理外部文件/文件夹拖拽
+    if (e.dataTransfer.files.length > 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      playlistEl.classList.remove("drag-over-drop");
+      
+      // 检查是否拖到了文件夹上
+      const targetNode = e.target.closest(".tree-node");
+      let basePath = "";
+      if (targetNode && targetNode.dataset.folderName) {
+        basePath = targetNode.dataset.folderName + "/";
+      }
+      
+      // 检查是否包含文件夹
+      const items = e.dataTransfer.items;
+      const files = [];
+      
+      // 处理 DataTransferItemList
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === 'file') {
+          const entry = item.webkitGetAsEntry();
+          if (entry) {
+            if (entry.isDirectory) {
+              // 处理文件夹
+              const file = new File([], entry.name);
+              file.isDirectory = true;
+              file.webkitGetAsEntry = () => entry;
+              files.push(file);
+            } else {
+              // 处理文件
+              item.getAsFile((file) => {
+                if (file) {
+                  files.push(file);
+                }
+              });
+            }
+          } else {
+            // 回退到普通文件处理
+            const file = e.dataTransfer.files[i];
+            files.push(file);
+          }
+        }
+      }
+      
+      // 处理普通文件
+      for (let i = 0; i < e.dataTransfer.files.length; i++) {
+        const file = e.dataTransfer.files[i];
+        if (!files.some(f => f.name === file.name)) {
+          files.push(file);
+        }
+      }
+      
+      if (files.length > 0) {
+        await addToPlaylist(files, basePath);
+      }
+      return;
+    }
+    
+    // 内部拖拽处理
+    if (playlistDragIndices.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sourceIndex = playlistDragIndex;
+    const targetContent = e.target.closest(".tree-node-content");
+    const targetNode = e.target.closest(".tree-node");
+    
+    // 检查是否拖到文件夹上
+    if (targetNode && targetNode.dataset.folderName) {
+      const folderName = targetNode.dataset.folderName;
+      
+      // 保存历史状态
+      savePlaylistHistory();
+      
+      // 检查是否是多选拖拽
+      if (playlistDragIndices.length > 1) {
+        // 多选拖拽到文件夹
+        for (const idx of playlistDragIndices) {
+          const sourceItem = state.playlist[idx];
+          if (sourceItem) {
+            const sourceName = sourceItem.name;
+            
+            try {
+              const response = await fetch('/api/playlist/move-item', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  source_name: sourceName,
+                  target_folder: folderName
+                })
+              });
+              const data = await response.json();
+              
+              if (data.status !== 'success') {
+                alert(`移动文件失败: ${data.error || '未知错误'}`);
+                break;
+              }
+            } catch (e) {
+              console.error('移动文件失败:', e);
+              alert(`移动文件失败: ${e.message || '网络错误'}`);
+              break;
+            }
+          }
+        }
+        
+        // 移动成功后，重新从真实文件夹加载播放列表
+        await loadPlaylist();
+        
+        // 清除所有拖拽高亮
+        playlistEl.querySelectorAll(".drag-over-before").forEach(el => el.classList.remove("drag-over-before"));
+        playlistEl.querySelectorAll(".drag-over-after").forEach(el => el.classList.remove("drag-over-after"));
+        playlistEl.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+        playlistDragIndex = null;
+        playlistDragIndices = [];
+        isPlaylistDragging = false;
+        
+        return;
+      } else {
+        // 单选拖拽到文件夹
+        const sourceItem = state.playlist[sourceIndex];
+        
+        if (sourceItem) {
+          // 调用后端API移动文件
+          const sourceName = sourceItem.name;
+          const oldName = sourceName.replace(/^[^\/]+\//, "");
+          
+          try {
+            const response = await fetch('/api/playlist/move-item', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                source_name: sourceName,
+                target_folder: folderName
+              })
+            });
+            const data = await response.json();
+            
+            if (data.status === 'success') {
+              // 移动成功后，重新从真实文件夹加载播放列表
+              await loadPlaylist();
+              
+              // 清除所有拖拽高亮
+              playlistEl.querySelectorAll(".drag-over-before").forEach(el => el.classList.remove("drag-over-before"));
+              playlistEl.querySelectorAll(".drag-over-after").forEach(el => el.classList.remove("drag-over-after"));
+              playlistEl.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+              playlistDragIndex = null;
+              playlistDragIndices = [];
+              isPlaylistDragging = false;
+              
+              return;
+            } else {
+              alert(`移动文件失败: ${data.error || '未知错误'}`);
+            }
+          } catch (e) {
+            console.error('移动文件失败:', e);
+            alert(`移动文件失败: ${e.message || '网络错误'}`);
+          }
+        }
+      }
+    }
+    
+    let targetIndex = state.playlist.length - 1;
+    let insertBefore = false;
+    
+    if (targetContent && targetContent.dataset.index !== undefined) {
+      targetIndex = parseInt(targetContent.dataset.index);
+      
+      // 计算鼠标在目标元素上的相对位置
+      const rect = targetContent.getBoundingClientRect();
+      const relativeY = e.clientY - rect.top;
+      const isUpperHalf = relativeY < rect.height / 2;
+      
+      // 根据位置确定插入位置
+      if (isUpperHalf) {
+        insertBefore = true;
+      }
+    }
+    
+    // 清除所有拖拽高亮
+    playlistEl.querySelectorAll(".drag-over-before").forEach(el => el.classList.remove("drag-over-before"));
+    playlistEl.querySelectorAll(".drag-over-after").forEach(el => el.classList.remove("drag-over-after"));
+    playlistEl.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+    playlistDragIndex = null;
+    playlistDragIndices = [];
+    isPlaylistDragging = false;
+    
+    if (Number.isInteger(sourceIndex) && Number.isInteger(targetIndex)) {
+      if (playlistDragIndices.length > 1) {
+        // 多选拖拽
+        reorderMultiplePlaylistItems(playlistDragIndices, targetIndex, insertBefore);
+      } else {
+        // 单选拖拽
+        reorderPlaylist(sourceIndex, targetIndex, insertBefore);
+      }
+    }
+  });
+  
+  playlistEl.addEventListener("dragend", (e) => {
+    playlistDragIndex = null;
+    playlistDragIndices = [];
+    isPlaylistDragging = false;
+    playlistEl.classList.remove("drag-over-drop");
+    playlistEl.classList.remove("dragging-active");
+    playlistEl.querySelectorAll(".dragging").forEach(el => el.classList.remove("dragging"));
+    playlistEl.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
+    playlistEl.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+  });
+  
+  playlistEl.dataset.treeDragBound = "1";
+};
+
+const bindPlaylistContextMenu = (playlistEl) => {
+  if (playlistEl.dataset.contextMenuBound) return;
+  
+  playlistEl.addEventListener("contextmenu", (e) => {
+    const contentEl = e.target.closest(".tree-node-content");
+    const nodeEl = e.target.closest(".tree-node");
+    
+    if (nodeEl) {
+      const idx = contentEl?.dataset.index;
+      const docId = nodeEl.dataset.docId;
+      const folderName = nodeEl.dataset.folderName;
+      
+      if (idx !== undefined && idx !== null) {
+        const index = parseInt(idx);
+        const item = state.playlist[index];
+        
+        if (state.selectedPlaylistIndices.length > 1) {
+          showContextMenu(e, "playlist-multi", { index: index });
+        } else if (state.selectedPlaylistIndices.length === 1 && state.selectedPlaylistIndices[0] === index) {
+          showContextMenu(e, "playlist-file", { index: index });
+        } else if (item && item.name && item.name.endsWith("/")) {
+          showContextMenu(e, "playlist-folder", { name: item.name.replace(/\/$/, "") });
+        } else if (item) {
+          showContextMenu(e, "playlist-file", { index: index });
+        } else {
+          showContextMenu(e, "playlist-root", null);
+        }
+      } else if (folderName) {
+        if (state.selectedPlaylistIndices.length > 1) {
+          showContextMenu(e, "playlist-multi", { index: null });
+        } else {
+          showContextMenu(e, "playlist-folder", { name: folderName });
+        }
+      } else {
+        showContextMenu(e, "playlist-root", null);
+      }
+    } else {
+      showContextMenu(e, "playlist-root", null);
+    }
+  });
+  
+  playlistEl.dataset.contextMenuBound = "1";
+};
+
+// Context Menu ---------------------------------------------------------------
+
+const showContextMenu = (e, targetType, nodeData) => {
+  e.preventDefault();
+  e.stopPropagation();
+  
+  const menu = $("#context-menu");
+  if (!menu) return;
+  
+  state.contextMenu.visible = true;
+  state.contextMenu.target = e.target;
+  state.contextMenu.targetType = targetType;
+  state.contextMenu.nodeData = nodeData;
+  
+  let menuItems = [];
+  
+  if (targetType === "playlist-root") {
+    menuItems = [
+      { icon: "📁", label: "新建文件夹", action: "create-folder" },
+      { separator: true },
+      { icon: "🗑️", label: "清空列表", action: "clear-playlist", danger: true }
+    ];
+  } else if (targetType === "playlist-multi") {
+    menuItems = [
+      { icon: "🗑️", label: `删除选中 (${state.selectedPlaylistIndices.length} 项)`, action: "delete-selected-files", danger: true }
+    ];
+  } else if (targetType === "playlist-folder") {
+    menuItems = [
+      { icon: "✏️", label: "重命名", action: "rename-folder" },
+      { icon: "🗑️", label: "删除文件夹", action: "delete-folder", danger: true }
+    ];
+  } else if (targetType === "playlist-file") {
+    menuItems = [
+      { icon: "🗑️", label: "删除", action: "delete-file", danger: true }
+    ];
+  } else if (targetType === "documents-root") {
+    menuItems = [
+      { icon: "📁", label: "新建文件夹", action: "create-folder" },
+      { separator: true },
+      { icon: "🗑️", label: "清空列表", action: "clear-documents", danger: true }
+    ];
+  } else if (targetType === "documents-folder") {
+    menuItems = [
+      { icon: "✏️", label: "重命名", action: "rename-folder" },
+      { icon: "🗑️", label: "删除文件夹", action: "delete-folder", danger: true }
+    ];
+  } else if (targetType === "documents-file") {
+    menuItems = [
+      { icon: "🗑️", label: "删除", action: "delete-file", danger: true }
+    ];
+  }
+  
+  menu.innerHTML = menuItems.map(item => {
+    if (item.separator) {
+      return '<div class="context-menu-separator"></div>';
+    }
+    const dangerClass = item.danger ? "danger" : "";
+    return `<div class="context-menu-item ${dangerClass}" data-action="${item.action}">
+      <span class="context-menu-item-icon">${item.icon}</span>
+      <span>${item.label}</span>
+    </div>`;
+  }).join("");
+  
+  menu.style.display = "block";
+  
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
+  const windowWidth = window.innerWidth;
+  const windowHeight = window.innerHeight;
+  
+  let x = e.clientX;
+  let y = e.clientY;
+  
+  if (x + menuWidth > windowWidth) {
+    x = windowWidth - menuWidth - 8;
+  }
+  if (y + menuHeight > windowHeight) {
+    y = windowHeight - menuHeight - 8;
+  }
+  
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  
+  menu.querySelectorAll(".context-menu-item").forEach(item => {
+    item.addEventListener("click", handleContextMenuAction);
+  });
+};
+
+const hideContextMenu = () => {
+  const menu = $("#context-menu");
+  if (menu) {
+    menu.style.display = "none";
+  }
+  state.contextMenu.visible = false;
+  state.contextMenu.target = null;
+  state.contextMenu.targetType = null;
+  state.contextMenu.nodeData = null;
+};
+
+const handleContextMenuAction = async (e) => {
+  const action = e.currentTarget.dataset.action;
+  const targetType = state.contextMenu.targetType;
+  const nodeData = state.contextMenu.nodeData;
+  
+  hideContextMenu();
+  
+  switch (action) {
+    case "create-folder":
+      createFolder(targetType);
+      break;
+    case "rename-folder":
+      renameFolder(targetType, nodeData);
+      break;
+    case "delete-folder":
+      deleteFolder(targetType, nodeData);
+      break;
+    case "delete-file":
+      if (targetType === "playlist-file") {
+        removeFromPlaylist(nodeData.index);
+      } else if (targetType === "documents-file") {
+        deleteReadingDocument(nodeData.docId);
+      }
+      break;
+    case "delete-selected-files":
+      if (state.selectedPlaylistIndices.length > 0) {
+        if (confirm(`确定要删除选中的 ${state.selectedPlaylistIndices.length} 项吗？`)) {
+          savePlaylistHistory();
+          
+          const indices = [...state.selectedPlaylistIndices].sort((a, b) => b - a);
+          const itemsToDelete = indices.map(index => state.playlist[index]);
+          
+          for (const item of itemsToDelete) {
+            try {
+              const response = await fetch('/api/media/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: item.name })
+              });
+              const data = await response.json();
+              
+              if (data.status !== 'success') {
+                console.error(`删除 ${item.name} 失败:`, data.error);
+              }
+            } catch (e) {
+              console.error(`删除 ${item.name} 失败:`, e);
+            }
+          }
+          
+          for (const index of indices) {
+            if (state.playlist[index]) {
+              URL.revokeObjectURL(state.playlist[index].url);
+              state.playlist.splice(index, 1);
+              
+              if (state.currentPlaylistIndex === index) {
+                state.currentPlaylistIndex = -1;
+                $("#player").src = "";
+              } else if (state.currentPlaylistIndex > index) {
+                state.currentPlaylistIndex -= 1;
+              }
+            }
+          }
+          
+          state.selectedPlaylistIndices = [];
+          await loadPlaylist();
+        }
+      }
+      break;
+    case "clear-playlist":
+      clearPlaylist();
+      break;
+    case "clear-documents":
+      clearDocuments();
+      break;
+  }
+};
+
+const createFolder = async (targetType) => {
+  const folderName = prompt("请输入文件夹名称:", "新建文件夹");
+  if (!folderName || !folderName.trim()) return;
+  
+  const name = folderName.trim();
+  
+  if (targetType === "playlist-root") {
+    try {
+      const payload = { folder_name: name };
+      console.log("[createFolder] 准备发送的数据:", payload);
+      console.log("[createFolder] JSON.stringify 后:", JSON.stringify(payload));
+      
+      const response = await fetch('/api/playlist/create-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      
+      console.log("[createFolder] 服务器响应:", data);
+      
+      if (data.status === 'success') {
+        // 创建成功后，重新从真实文件夹加载播放列表
+        await loadPlaylist();
+      } else {
+        alert(`创建文件夹失败: ${data.error || '未知错误'}`);
+      }
+    } catch (e) {
+      console.error('创建文件夹失败:', e);
+      alert(`创建文件夹失败: ${e.message || '网络错误'}`);
+    }
+  } else if (targetType === "documents-root") {
+    createReadingFolder(name);
+  }
+};
+
+const renameFolder = async (targetType, nodeData) => {
+  const newName = prompt("请输入新的文件夹名称:", nodeData.name);
+  if (!newName || !newName.trim()) return;
+  
+  if (targetType === "playlist-folder") {
+    const oldName = nodeData.name;
+    const name = newName.trim();
+    
+    try {
+      const response = await fetch('/api/playlist/rename-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          old_name: oldName,
+          new_name: name
+        })
+      });
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        // 重命名成功后，重新从真实文件夹加载播放列表
+        await loadPlaylist();
+      } else {
+        alert(`重命名文件夹失败: ${data.error || '未知错误'}`);
+      }
+    } catch (e) {
+      console.error('重命名文件夹失败:', e);
+      alert(`重命名文件夹失败: ${e.message || '网络错误'}`);
+    }
+  } else if (targetType === "documents-folder") {
+    renameReadingFolder(nodeData.name, newName.trim());
+  }
+};
+
+const deleteFolder = async (targetType, nodeData) => {
+  if (targetType === "playlist-folder") {
+    const folderName = nodeData.name;
+    const folderPath = folderName + "/";
+    const count = state.playlist.filter(item => item.name && item.name.startsWith(folderPath)).length;
+    
+    if (!confirm(`确定要删除文件夹 "${folderName}" 及其 ${count} 个项目吗？`)) return;
+    
+    try {
+      const response = await fetch('/api/playlist/delete-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder_name: folderName })
+      });
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        // 删除成功后，重新从真实文件夹加载播放列表
+        await loadPlaylist();
+      } else {
+        alert(`删除文件夹失败: ${data.error || '未知错误'}`);
+      }
+    } catch (e) {
+      console.error('删除文件夹失败:', e);
+      alert(`删除文件夹失败: ${e.message || '网络错误'}`);
+    }
+  } else if (targetType === "documents-folder") {
+    deleteReadingFolder(nodeData.name);
+  }
+};
+
+const clearDocuments = () => {
+  if (!confirm("确定要清空所有文档吗？")) return;
+  readingState.documents = [];
+  readingState.currentDocId = null;
+  readingState.text = "";
+  $('#reading-content').innerHTML = '<p style="color: var(--muted); text-align: center; padding: 20px;">请从文档列表中选择文档</p>';
+  $('#reading-current-file').textContent = '未选择';
+  updateReadingProgress();
+  localStorage.setItem("readingDocuments", JSON.stringify([]));
+  renderReadingDocumentsList();
 };
 
 // File loading --------------------------------------------------------------
@@ -1454,40 +3267,149 @@ const loadMediaFile = (file) => {
 };
 
 const autoMatchSubtitles = async (mediaFile) => {
-  // 优先尝试从服务器加载字幕文件
   const baseName = mediaFile.name.replace(/\.[^.]+$/, '');
+  
+  // 1. 优先尝试从服务器加载 JSON 字幕文件
   try {
     const response = await fetch(`/api/subtitles/load/${encodeURIComponent(mediaFile.name)}`);
+    
+    const contentLength = response.headers.get('content-length');
+    if (contentLength) {
+      const sizeInMB = parseInt(contentLength) / (1024 * 1024);
+      if (sizeInMB > 50) {
+        console.warn(`服务器字幕数据过大: ${sizeInMB.toFixed(2)} MB，跳过加载以避免OOM`);
+        if (!confirm(`检测到较大的字幕数据（${sizeInMB.toFixed(2)} MB），可能已损坏。是否继续加载？`)) {
+          return;
+        }
+      }
+    }
+    
     const data = await response.json();
+    
     if (data.status === 'success' && data.subtitles && data.subtitles.length > 0) {
-      state.subtitles = data.subtitles;
+      if (data.subtitles.length > 10000) {
+        console.warn(`服务器字幕数量异常: ${data.subtitles.length} 条，可能损坏，跳过加载`);
+        if (confirm(`检测到异常数量的字幕（${data.subtitles.length} 条），可能已损坏。是否继续加载？`)) {
+          state.subtitles = data.subtitles.slice(0, 10000);
+        } else {
+          return;
+        }
+      } else {
+        state.subtitles = data.subtitles;
+      }
+      
+      const dataSize = JSON.stringify(data.subtitles).length;
+      const sizeInMB = dataSize / (1024 * 1024);
+      console.log(`✓ 从服务器加载字幕: ${baseName}, ${data.subtitles.length} 条, ${sizeInMB.toFixed(2)} MB`);
+      
       state.history = [JSON.parse(JSON.stringify(state.subtitles))];
       state.historyIndex = 0;
       renderSubtitles();
       updateHistoryButtons();
-      console.log(`✓ 从服务器加载字幕: ${baseName}`);
       return;
     }
   } catch (e) {
-    console.log('服务器字幕不存在，尝试 localStorage');
+    console.log('服务器 JSON 字幕不存在或加载失败，尝试扫描 subtitle 文件夹:', e);
   }
   
-  // 回退到 localStorage
+  // 2. 尝试扫描 subtitle 文件夹中的字幕文件
+  try {
+    const scanResponse = await fetch(`/api/subtitles/scan?media=${encodeURIComponent(mediaFile.name)}`);
+    const scanData = await scanResponse.json();
+    
+    if (scanData.status === 'success' && scanData.files && scanData.files.length > 0) {
+      let subtitleFile = scanData.files[0];
+      
+      if (scanData.files.length > 1) {
+        const jsonFile = scanData.files.find(f => f.format === 'json');
+        if (jsonFile) {
+          subtitleFile = jsonFile;
+        }
+      }
+      
+      console.log(`✓ 找到字幕文件: ${subtitleFile.filename} (${subtitleFile.format})`);
+      
+      const loadResponse = await fetch(`/api/subtitles/load-file/${encodeURIComponent(subtitleFile.filename)}`);
+      const loadData = await loadResponse.json();
+      
+      if (loadData.status === 'success' && loadData.subtitles && loadData.subtitles.length > 0) {
+        state.subtitles = loadData.subtitles;
+        
+        const dataSize = JSON.stringify(loadData.subtitles).length;
+        const sizeInMB = dataSize / (1024 * 1024);
+        console.log(`✓ 从 subtitle 文件夹加载字幕: ${baseName}, ${loadData.subtitles.length} 条, ${sizeInMB.toFixed(2)} MB`);
+        
+        state.history = [JSON.parse(JSON.stringify(state.subtitles))];
+        state.historyIndex = 0;
+        renderSubtitles();
+        updateHistoryButtons();
+        return;
+      }
+    }
+  } catch (e) {
+    console.log('subtitle 文件夹扫描失败:', e);
+  }
+  
+  // 3. 回退到 localStorage
   const subtitleKey = `lr-${baseName}-subs`;
   const saved = localStorage.getItem(subtitleKey);
   if (saved) {
     try {
-      const subs = JSON.parse(saved);
-      if (Array.isArray(subs) && subs.length > 0) {
-        state.subtitles = subs;
-        state.history = [JSON.parse(JSON.stringify(subs))];
-        state.historyIndex = 0;
-        renderSubtitles();
-        updateHistoryButtons();
-        console.log(`✓ 从 localStorage 加载字幕: ${baseName}`);
+      const savedSize = saved.length;
+      const sizeInMB = savedSize / (1024 * 1024);
+      
+      if (sizeInMB > 50) {
+        console.warn(`localStorage字幕数据过大: ${sizeInMB.toFixed(2)} MB，可能损坏`);
+        if (!confirm(`检测到较大的本地字幕数据（${sizeInMB.toFixed(2)} MB），可能已损坏。是否继续加载？`)) {
+          return;
+        }
       }
+      
+      const subs = JSON.parse(saved);
+      
+      if (!Array.isArray(subs)) {
+        console.warn('localStorage字幕数据格式错误：不是数组');
+        return;
+      }
+      
+      if (subs.length > 10000) {
+        console.warn(`localStorage字幕数量异常: ${subs.length} 条，可能损坏`);
+        if (confirm(`检测到异常数量的字幕（${subs.length} 条），可能已损坏。是否继续加载？`)) {
+          state.subtitles = subs.slice(0, 10000);
+        } else {
+          return;
+        }
+      } else if (subs.length > 0) {
+        state.subtitles = subs;
+      } else {
+        return;
+      }
+      
+      state.history = [JSON.parse(JSON.stringify(state.subtitles))];
+      state.historyIndex = 0;
+      renderSubtitles();
+      updateHistoryButtons();
+      console.log(`✓ 从 localStorage 加载字幕: ${baseName}, ${subs.length} 条, ${sizeInMB.toFixed(2)} MB`);
     } catch (e) {
       console.warn('字幕加载失败', e);
+      try {
+        const cleaned = saved.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+        const subs = JSON.parse(cleaned);
+        if (Array.isArray(subs) && subs.length > 0) {
+          state.subtitles = subs;
+          state.history = [JSON.parse(JSON.stringify(subs))];
+          state.historyIndex = 0;
+          renderSubtitles();
+          updateHistoryButtons();
+          console.log(`✓ 修复后从 localStorage 加载字幕: ${baseName}`);
+          localStorage.setItem(subtitleKey, JSON.stringify(subs));
+        }
+      } catch (e2) {
+        console.error('无法修复损坏的字幕数据:', e2);
+        if (confirm("字幕数据损坏无法修复。是否清除此数据？")) {
+          localStorage.removeItem(subtitleKey);
+        }
+      }
     }
   }
 };
@@ -1515,14 +3437,80 @@ const parseSrt = (text) => {
   return subs;
 };
 
+const parseLrc = (text) => {
+  const subs = [];
+  const lines = text.split(/\r?\n/);
+  
+  lines.forEach((line) => {
+    // 匹配LRC格式: [mm:ss.xx] 或 [mm:ss.xxx] 或 [mm:ss]
+    const match = line.match(/^\[(\d+):(\d+)(?:\.(\d+))?\](.*)$/);
+    if (match) {
+      const minutes = parseInt(match[1], 10);
+      const seconds = parseInt(match[2], 10);
+      const milliseconds = match[3] ? parseInt(match[3].padEnd(3, '0').substring(0, 3), 10) : 0;
+      const text = match[4].trim();
+      
+      if (text) {
+        const start = minutes * 60 + seconds + milliseconds / 1000;
+        // LRC通常只有开始时间，结束时间设为开始时间+5秒（可调整）
+        const end = start + 5.0;
+        subs.push({ start, end, en: text, zh: "", userEn: "", userZh: "", note: "" });
+      }
+    }
+  });
+  
+  // 按时间排序
+  subs.sort((a, b) => a.start - b.start);
+  
+  // 调整结束时间：下一句的开始时间或当前句开始+5秒
+  for (let i = 0; i < subs.length; i++) {
+    if (i < subs.length - 1) {
+      subs[i].end = subs[i + 1].start - 0.05; // 留50ms间隔
+    } else {
+      // 最后一句保持默认5秒
+      subs[i].end = subs[i].start + 5.0;
+    }
+    
+    // 确保结束时间大于开始时间
+    if (subs[i].end <= subs[i].start) {
+      subs[i].end = subs[i].start + 1.0;
+    }
+  }
+  
+  return subs;
+};
+
 const loadSubtitleFile = async (file) => {
   const text = await file.text();
   let parsed = [];
-  try {
-    parsed = JSON.parse(text);
-  } catch (_) {
+  
+  // 检测文件类型并选择合适的解析器
+  const fileName = file.name.toLowerCase();
+  
+  if (fileName.endsWith('.lrc')) {
+    // LRC 格式
+    parsed = parseLrc(text);
+    if (parsed.length === 0) {
+      alert('LRC 文件解析失败或内容为空');
+      return;
+    }
+  } else if (fileName.endsWith('.json')) {
+    // JSON 格式
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      alert('JSON 文件解析失败：' + e.message);
+      return;
+    }
+  } else {
+    // SRT 或其他文本格式
     parsed = parseSrt(text);
+    if (parsed.length === 0) {
+      alert('字幕文件解析失败或内容为空');
+      return;
+    }
   }
+  
   state.subtitles = parsed;
   // 初始化历史记录
   state.history = [JSON.parse(JSON.stringify(parsed))];
@@ -1531,6 +3519,8 @@ const loadSubtitleFile = async (file) => {
   renderSubtitles();
   renderWaveformRegions(); // 渲染波形图字幕区域
   updateHistoryButtons();
+  
+  console.log(`✓ 成功导入 ${parsed.length} 条字幕 (${fileName.endsWith('.lrc') ? 'LRC' : fileName.endsWith('.json') ? 'JSON' : 'SRT'} 格式)`);
 };
 
 // Rendering -----------------------------------------------------------------
@@ -1587,6 +3577,380 @@ const renderWaveformRegions = () => {
   });
   
   logEvent('waveformRegionsRendered', { count: state.subtitles.length });
+};
+
+// 显示词典查询结果
+const showDictionaryResult = (bubble, word, data) => {
+  let html = `<div class="bubble-word">${word}</div>`;
+  
+  const inputWord = data.morphology?.word || '';
+  
+  if (data.morphology && data.morphology.analyses && data.morphology.analyses.length > 0) {
+    html += `<div class="dict-section">
+      <strong>📖 词法分析：</strong><br>`;
+    
+    const analysis = data.morphology.analyses[0];
+    
+    if (inputWord && inputWord.toLowerCase() !== analysis.normal_form.toLowerCase()) {
+      html += `<span style="color: var(--text)">输入词：${inputWord}</span><br>`;
+    }
+    
+    if (analysis.normal_form) {
+      html += `<span style="color: var(--accent)">原形：${analysis.normal_form}</span><br>`;
+    }
+    if (analysis.pos) {
+      html += `词性：${translateGrammarLabel('pos', analysis.pos)}<br>`;
+    }
+    if (analysis.case) html += `格：${translateGrammarLabel('case', analysis.case)} `;
+    if (analysis.gender) html += `性：${translateGrammarLabel('gender', analysis.gender)} `;
+    if (analysis.number) html += `数：${translateGrammarLabel('number', analysis.number)}<br>`;
+    if (analysis.tense) html += `时态：${translateGrammarLabel('tense', analysis.tense)} `;
+    if (analysis.person) html += `人称：${translateGrammarLabel('person', analysis.person)} `;
+    if (analysis.voice) html += `语态：${translateGrammarLabel('voice', analysis.voice)}<br>`;
+    if (analysis.mood) html += `式：${translateGrammarLabel('mood', analysis.mood)} `;
+    if (analysis.aspect) html += `体：${translateGrammarLabel('aspect', analysis.aspect)}<br>`;
+    html += `</div>`;
+  }
+  
+  // 变格形式
+  if (data.inflections && data.inflections.inflections && Object.keys(data.inflections.inflections).length > 0) {
+    html += `<div class="dict-section">
+      <strong>🔄 变格形式 (${data.inflections.pos || '未知词性'})：</strong><br>`;
+    
+    const inflections = data.inflections.inflections;
+    const pos = data.inflections.pos;
+    
+    if (pos === 'NOUN') {
+      html += renderNounInflectionsCompact(inflections);
+    } else if (pos === 'VERB') {
+      html += renderVerbInflectionsCompact(inflections);
+    } else if (pos === 'ADJF' || pos === 'ADJS') {
+      html += renderAdjectiveInflectionsCompact(inflections);
+    } else {
+      html += renderGenericInflectionsCompact(inflections);
+    }
+    
+    html += `</div>`;
+  }
+  
+  // 词典查询结果
+  if (data.dictionary && data.dictionary.length > 0) {
+    html += `<div class="dict-section">
+      <strong>📚 词典释义：</strong><br>`;
+    data.dictionary.forEach(entry => {
+      html += `<div style="margin: 8px 0; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 4px;">`;
+      html += `<strong>${entry.word}</strong>`;
+      if (entry.pos) html += ` <span style="color: var(--muted); font-size: 11px;">(${entry.pos})</span>`;
+      html += `<br>`;
+      if (entry.translation) {
+        let translationText = entry.translation;
+        translationText = translationText.replace(/\\n/g, '\n');
+        const translationLines = translationText.split('\n');
+        html += '<div style="line-height: 1.8;">';
+        translationLines.forEach((line, lineIndex) => {
+          if (line.trim()) {
+            const trimmedLine = line.trim();
+            if (/^\d+\)/.test(trimmedLine)) {
+              html += `<div style="margin-top: 8px;">${trimmedLine}</div>`;
+            } else if (/^\s+\S/.test(line)) {
+              html += `<div style="margin-left: 20px;">${trimmedLine}</div>`;
+            } else {
+              html += `<div>${trimmedLine}</div>`;
+            }
+          }
+        });
+        html += '</div>';
+      }
+      if (entry.examples && entry.examples.length > 0) {
+        html += `<div style="font-size: 11px; color: var(--muted); margin-top: 4px;">`;
+        entry.examples.forEach(ex => html += `• ${ex}<br>`);
+        html += `</div>`;
+      }
+      html += `</div>`;
+    });
+    html += `</div>`;
+  } else {
+    html += `<div class="dict-section" style="color: var(--muted)">
+      暂无词典释义（请导入词库文件）
+    </div>`;
+  }
+  
+  // 生词本记录
+  if (data.vocab) {
+    html += `<div class="dict-section">
+      <strong>📝 生词本记录：</strong><br>`;
+    if (data.vocab.meaning) html += `释义：${data.vocab.meaning}<br>`;
+    if (data.vocab.note) html += `批注：${data.vocab.note}<br>`;
+    html += `</div>`;
+  }
+  
+  html += `<div class="bubble-buttons">
+    <button class="bubble-back-btn">← 返回</button>
+    <button class="bubble-note-btn">📝 添加到生词本</button>
+  </div>`;
+  
+  bubble.innerHTML = html;
+  
+  // 返回按钮
+  const backBtn = bubble.querySelector('.bubble-back-btn');
+  if (backBtn) {
+    backBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      bubble.remove();
+      window.getSelection().removeAllRanges();
+    });
+  }
+  
+  // 添加到生词本按钮
+  const noteBtn = bubble.querySelector('.bubble-note-btn');
+  if (noteBtn) {
+    noteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // 获取词法分析的原形作为默认释义
+      let defaultMeaning = '';
+      if (data.morphology && data.morphology.analyses && data.morphology.analyses.length > 0) {
+        const analysis = data.morphology.analyses[0];
+        if (analysis.normal_form && analysis.normal_form !== word.toLowerCase()) {
+          defaultMeaning = `原形：${analysis.normal_form}`;
+        }
+      }
+      
+      // 如果有词典释义，追加
+      if (data.dictionary && data.dictionary.length > 0) {
+        if (defaultMeaning) defaultMeaning += ' | ';
+        defaultMeaning += data.dictionary[0].translation || '';
+      }
+      
+      const vocabItem = data.vocab || { meaning: defaultMeaning, note: '' };
+      const subtitleItem = state.subtitles[state.currentIndex] || {};
+      showBubbleEditMode(bubble, word, vocabItem, subtitleItem);
+    });
+  }
+};
+
+// 渲染名词变格形式（紧凑版）
+const renderNounInflectionsCompact = (inflections) => {
+  let html = '<div style="overflow-x: auto;">';
+  html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+  
+  const numbers = Object.keys(inflections);
+  const cases = ['主格', '属格', '与格', '宾格', '工具格', '前置格'];
+  
+  html += '<tr style="background: rgba(255,255,255,0.1);">';
+  html += '<th style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+  numbers.forEach(num => {
+    html += `<th style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">${num}</th>`;
+  });
+  html += '</tr>';
+  
+  cases.forEach(caseName => {
+    html += '<tr>';
+    html += `<td style="padding: 4px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+    numbers.forEach(num => {
+      const value = inflections[num][caseName] || '-';
+      html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${value}</td>`;
+    });
+    html += '</tr>';
+  });
+  
+  html += '</table>';
+  html += '</div>';
+  
+  // 短尾形式
+  if (inflections['短尾形式']) {
+    html += '<div style="margin-top: 8px;">';
+    html += '<strong style="font-size: 10px; color: var(--secondary);">短尾形式</strong>';
+    html += '<div style="overflow-x: auto; margin-top: 4px;">';
+    html += '<table style="width: 100%; border-collapse: collapse; font-size: 10px;">';
+    html += '<tr style="background: rgba(255,255,255,0.1);">';
+    
+    const shortForms = inflections['短尾形式'];
+    const shortGenders = Object.keys(shortForms);
+    shortGenders.forEach(gender => {
+      html += `<th style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">${gender}</th>`;
+    });
+    html += '</tr>';
+    
+    html += '<tr>';
+    shortGenders.forEach(gender => {
+      const value = shortForms[gender] || '-';
+      html += `<td style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${value}</td>`;
+    });
+    html += '</tr>';
+    
+    html += '</table>';
+    html += '</div>';
+    html += '</div>';
+  }
+  
+  // 比较级
+  if (inflections['比较级']) {
+    html += '<div style="margin-top: 8px;">';
+    html += '<strong style="font-size: 10px; color: var(--secondary);">比较级</strong>';
+    html += `<div style="padding: 2px; margin-top: 4px; color: var(--primary); font-size: 10px;">${inflections['比较级']}</div>`;
+    html += '</div>';
+  }
+  
+  return html;
+};
+
+// 渲染动词变格形式（紧凑版）
+const renderVerbInflectionsCompact = (inflections) => {
+  let html = '';
+  
+  const moods = Object.keys(inflections);
+  
+  moods.forEach(mood => {
+    html += `<div style="margin-bottom: 8px;">`;
+    html += `<strong style="color: var(--accent); font-size: 11px;">${mood}</strong>`;
+    
+    if (mood === '陈述式') {
+      const tenses = Object.keys(inflections[mood]);
+      tenses.forEach(tense => {
+        html += `<div style="margin-left: 8px; margin-top: 4px;">`;
+        html += `<span style="font-size: 10px; color: var(--secondary);">${tense}</span>`;
+        html += '<div style="overflow-x: auto;">';
+        html += '<table style="width: 100%; border-collapse: collapse; font-size: 10px;">';
+        html += '<tr style="background: rgba(255,255,255,0.1);">';
+        html += '<th style="padding: 2px; border: 1px solid rgba(255,255,255,0.2);">人称</th>';
+        html += '<th style="padding: 2px; border: 1px solid rgba(255,255,255,0.2);">单数</th>';
+        html += '<th style="padding: 2px; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+        html += '</tr>';
+        
+        const persons = ['一', '二', '三'];
+        persons.forEach(person => {
+          html += '<tr>';
+          html += `<td style="padding: 2px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${person}</td>`;
+          const singValue = inflections[mood][tense]['单数'] ? inflections[mood][tense]['单数'][person] || '-' : '-';
+          const plurValue = inflections[mood][tense]['复数'] ? inflections[mood][tense]['复数'][person] || '-' : '-';
+          html += `<td style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${singValue}</td>`;
+          html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${plurValue}</td>`;
+          html += '</tr>';
+        });
+        
+        html += '</table>';
+        html += '</div>';
+        html += `</div>`;
+      });
+    } else if (mood === '命令式') {
+      html += '<div style="overflow-x: auto;">';
+      html += '<table style="width: 100%; border-collapse: collapse; font-size: 10px;">';
+      html += '<tr style="background: rgba(255,255,255,0.1);">';
+      html += '<th style="padding: 2px; border: 1px solid rgba(255,255,255,0.2);">数</th>';
+      html += '<th style="padding: 2px; border: 1px solid rgba(255,255,255,0.2);">形式</th>';
+      html += '</tr>';
+      
+      const numbers = Object.keys(inflections[mood]['命令式']);
+      numbers.forEach(num => {
+        html += '<tr>';
+        html += `<td style="padding: 2px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${num}</td>`;
+        html += `<td style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${inflections[mood]['命令式'][num]}</td>`;
+        html += '</tr>';
+      });
+      
+      html += '</table>';
+      html += '</div>';
+    }
+    
+    html += `</div>`;
+  });
+  
+  return html;
+};
+
+// 渲染形容词变格形式（紧凑版）
+const renderAdjectiveInflectionsCompact = (inflections) => {
+  let html = '<div style="overflow-x: auto;">';
+  html += '<table style="width: 100%; border-collapse: collapse; font-size: 10px;">';
+  
+  const numbers = Object.keys(inflections);
+  const cases = ['主格', '属格', '与格', '宾格', '工具格', '前置格'];
+  
+  if (numbers.includes('单数')) {
+    const genders = Object.keys(inflections['单数']);
+    
+    html += '<tr style="background: rgba(255,255,255,0.1);">';
+    html += '<th style="padding: 2px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+    genders.forEach(gender => {
+      html += `<th style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">${gender}</th>`;
+    });
+    if (numbers.includes('复数')) {
+      html += '<th style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+    }
+    html += '</tr>';
+    
+    cases.forEach(caseName => {
+      html += '<tr>';
+      html += `<td style="padding: 2px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+      genders.forEach(gender => {
+        const value = inflections['单数'][gender][caseName] || '-';
+        html += `<td style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${value}</td>`;
+      });
+      if (numbers.includes('复数')) {
+        const value = inflections['复数'][caseName] || '-';
+        html += `<td style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${value}</td>`;
+      }
+      html += '</tr>';
+    });
+  } else if (numbers.includes('复数')) {
+    html += '<tr style="background: rgba(255,255,255,0.1);">';
+    html += '<th style="padding: 2px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+    html += '<th style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">复数</th>';
+    html += '</tr>';
+    
+    cases.forEach(caseName => {
+      html += '<tr>';
+      html += `<td style="padding: 2px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+      const value = inflections['复数'][caseName] || '-';
+      html += `<td style="padding: 2px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${value}</td>`;
+      html += '</tr>';
+    });
+  }
+  
+  html += '</table>';
+  html += '</div>';
+  return html;
+};
+
+// 渲染通用变格形式（紧凑版）
+const renderGenericInflectionsCompact = (inflections) => {
+  let html = '<div style="overflow-x: auto;">';
+  html += '<table style="width: 100%; border-collapse: collapse; font-size: 11px;">';
+  
+  const numbers = Object.keys(inflections);
+  
+  if (numbers.includes('单数') || numbers.includes('复数')) {
+    const cases = ['主格', '属格', '与格', '宾格', '工具格', '前置格'];
+    
+    html += '<tr style="background: rgba(255,255,255,0.1);">';
+    html += '<th style="padding: 4px; text-align: left; border: 1px solid rgba(255,255,255,0.2);">格</th>';
+    numbers.forEach(num => {
+      html += `<th style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2);">${num}</th>`;
+    });
+    html += '</tr>';
+    
+    cases.forEach(caseName => {
+      html += '<tr>';
+      html += `<td style="padding: 4px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${caseName}</td>`;
+      numbers.forEach(num => {
+        const value = inflections[num][caseName] || '-';
+        html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${value}</td>`;
+      });
+      html += '</tr>';
+    });
+  } else {
+    const keys = Object.keys(inflections);
+    keys.forEach(key => {
+      html += '<tr>';
+      html += `<td style="padding: 4px; font-weight: bold; border: 1px solid rgba(255,255,255,0.2);">${key}</td>`;
+      html += `<td style="padding: 4px; text-align: center; border: 1px solid rgba(255,255,255,0.2); color: var(--primary);">${inflections[key]}</td>`;
+      html += '</tr>';
+    });
+  }
+  
+  html += '</table>';
+  html += '</div>';
+  return html;
 };
 
 // 气泡编辑模式
@@ -1901,13 +4265,56 @@ const renderSubtitles = () => {
         // 创建气泡框
         const bubble = createEl("div", "vocab-bubble");
         bubble.innerHTML = `
-          <div class="bubble-word">${selection}</div>
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <div class="bubble-word">${selection}</div>
+            <button class="bubble-lookup-btn" style="background: none; border: none; cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 3px; transition: background 0.2s;">
+              🔍
+            </button>
+          </div>
           ${vocabItem ? `<div class="bubble-meaning">${vocabItem.meaning || '未设置释义'}</div>` : ''}
           ${vocabItem && vocabItem.note ? `<div class="bubble-note"><strong>批注：</strong>${vocabItem.note}</div>` : ''}
           <div class="bubble-buttons">
             <button class="bubble-note-btn">📝 添加释义和批注</button>
           </div>
         `;
+        
+        // 查词典功能
+        const lookupBtn = bubble.querySelector('.bubble-lookup-btn');
+        if (lookupBtn) {
+          lookupBtn.addEventListener('click', async (evt) => {
+            evt.stopPropagation();
+            evt.preventDefault();
+            
+            // 跳转到词典模块并搜索
+            bubble.remove();
+            window.getSelection().removeAllRanges();
+            
+            // 确保词典模块展开
+            const dictionaryBody = document.getElementById('dictionary-body');
+            if (dictionaryBody) {
+              dictionaryBody.style.display = 'block';
+            }
+            
+            // 在词典搜索框中填入单词
+            const searchInput = document.getElementById('dictionary-search-input');
+            if (searchInput) {
+              searchInput.value = selection;
+              searchInput.focus();
+              
+              // 触发搜索
+              const searchBtn = document.getElementById('btn-dictionary-search');
+              if (searchBtn) {
+                searchBtn.click();
+              }
+            }
+            
+            // 滚动到词典模块
+            const dictionarySection = document.querySelector('#dictionary-body').closest('.collapsible');
+            if (dictionarySection) {
+              dictionarySection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          }, true);
+        }
         
         // 编辑/添加功能
         const noteBtn = bubble.querySelector('.bubble-note-btn');
@@ -2002,11 +4409,21 @@ const renderEditors = () => {
     $("#edit-en").value = "";
     $("#edit-zh").value = "";
     $("#edit-note").value = "";
+    
+    // 立即调整文本框高度
+    autoResizeTextarea($("#edit-en"));
+    autoResizeTextarea($("#edit-zh"));
+    autoResizeTextarea($("#edit-note"));
     return;
   }
   $("#edit-en").value = current.userEn || current.en || "";
   $("#edit-zh").value = current.userZh || current.zh || "";
   $("#edit-note").value = current.note || "";
+  
+  // 立即调整文本框高度
+  autoResizeTextarea($("#edit-en"));
+  autoResizeTextarea($("#edit-zh"));
+  autoResizeTextarea($("#edit-note"));
 };
 
 const renderVocab = () => {
@@ -2204,14 +4621,29 @@ const updateButtonState = (buttonId, isActive) => {
   }
 };
 
+// 播放控制状态栏文案（确保完整、一致且符合逻辑）
+const updatePlaybackStatusTexts = () => {
+  const autoPauseText = listenMode
+    ? "⏸️ 自动暂停：开（精听）"
+    : `⏸️ 自动暂停：${state.autoPause ? "开" : "关"}`;
+  const autoPlayText = listenMode
+    ? "▶️ 切句自动播放：开（精听）"
+    : `▶️ 切句自动播放：${state.autoPlay ? "开" : "关"}`;
+
+  const elPause = $("#auto-pause-status");
+  const elPlay = $("#auto-play-status");
+  if (elPause) elPause.textContent = autoPauseText;
+  if (elPlay) elPlay.textContent = autoPlayText;
+};
+
 const startListenMode = () => {
   listenMode = true;
   // 保存当前自动暂停状态
   savedAutoPauseState = state.autoPause;
   state.loop = false;
   state.autoPause = true;
-  $("#loop-status").textContent = "单句循环: 关";
-  $("#auto-pause-status").textContent = "自动暂停: 开";
+  $("#loop-status").textContent = "🔁 循环: 关";
+  updatePlaybackStatusTexts();
   updateButtonState("#btn-listen-mode", true);
   updateButtonState("#toggle-loop", false);
   updateButtonState("#toggle-auto-pause", true);
@@ -2222,7 +4654,7 @@ const stopListenMode = () => {
   listenMode = false;
   // 恢复进入精听前的自动暂停状态
   state.autoPause = savedAutoPauseState;
-  $("#auto-pause-status").textContent = `自动暂停: ${state.autoPause ? "开" : "关"}`;
+  updatePlaybackStatusTexts();
   updateButtonState("#btn-listen-mode", false);
   updateButtonState("#toggle-auto-pause", state.autoPause);
   alert("已退出精听训练模式");
@@ -2672,6 +5104,134 @@ const updateCommonVocabToggleStyle = () => {
   }
 };
 
+// 播放默认偏好设置渲染（参考“折叠偏好”的 iOS 风格开关）
+const renderPlaybackDefaultSettings = () => {
+  const container = document.getElementById("playback-default-settings");
+  if (!container) return;
+
+  container.style.display = "grid";
+  container.style.gridTemplateColumns = "1fr";
+  container.style.rowGap = "16px";
+  container.style.marginTop = "12px";
+  container.style.width = "100%";
+  container.style.boxSizing = "border-box";
+
+  const items = [
+    {
+      key: "defaultAutoPause",
+      label: "⏸️ 默认自动暂停",
+      get: () => !!state.settings.defaultAutoPause,
+      set: (v) => {
+        state.settings.defaultAutoPause = !!v;
+        // 默认偏好：非精听时可直接同步到当前开关，避免“改了设置但不生效”的困惑
+        if (!listenMode) {
+          state.autoPause = !!v;
+          updateButtonState("#toggle-auto-pause", state.autoPause);
+          updatePlaybackStatusTexts();
+        }
+        persistSettings();
+      }
+    },
+    {
+      key: "defaultAutoPlay",
+      label: "▶️ 默认切句自动播放",
+      get: () => !!state.settings.defaultAutoPlay,
+      set: (v) => {
+        state.settings.defaultAutoPlay = !!v;
+        if (!listenMode) {
+          state.autoPlay = !!v;
+          updateButtonState("#toggle-auto-play", state.autoPlay);
+          updatePlaybackStatusTexts();
+        }
+        persistSettings();
+      }
+    },
+  ];
+
+  container.innerHTML = "";
+
+  const buildToggle = (labelText, checked, onChange) => {
+    const wrap = document.createElement("div");
+    wrap.className = "toggle-item";
+    wrap.style.display = "flex";
+    wrap.style.justifyContent = "space-between";
+    wrap.style.alignItems = "center";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "toggle-label";
+    labelEl.textContent = labelText;
+
+    const toggleLabel = document.createElement("label");
+    toggleLabel.style.position = "relative";
+    toggleLabel.style.display = "inline-block";
+    toggleLabel.style.width = "44px";
+    toggleLabel.style.height = "24px";
+    toggleLabel.style.verticalAlign = "middle";
+    toggleLabel.style.cursor = "pointer";
+    toggleLabel.style.flexShrink = "0";
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!checked;
+    input.style.display = "none";
+
+    const slider = document.createElement("span");
+    slider.style.position = "absolute";
+    slider.style.top = "0";
+    slider.style.left = "0";
+    slider.style.right = "0";
+    slider.style.bottom = "0";
+    slider.style.width = "44px";
+    slider.style.height = "24px";
+    slider.style.cursor = "pointer";
+    slider.style.borderRadius = "24px";
+    slider.style.transition = "background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1)";
+    slider.style.display = "block";
+
+    const knob = document.createElement("span");
+    knob.style.position = "absolute";
+    knob.style.width = "20px";
+    knob.style.height = "20px";
+    knob.style.borderRadius = "50%";
+    knob.style.backgroundColor = "white";
+    knob.style.top = "2px";
+    knob.style.transition = "left 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s ease";
+    knob.style.boxShadow = "0 2px 4px rgba(0, 0, 0, 0.2)";
+    knob.style.display = "block";
+
+    const updateToggleStyle = () => {
+      if (input.checked) {
+        slider.style.backgroundColor = "#34c759";
+        knob.style.left = "22px";
+        knob.style.boxShadow = "0 2px 5px rgba(52, 199, 89, 0.3)";
+      } else {
+        slider.style.backgroundColor = "#a0aec0";
+        knob.style.left = "2px";
+        knob.style.boxShadow = "0 2px 4px rgba(0, 0, 0, 0.2)";
+      }
+    };
+    updateToggleStyle();
+
+    toggleLabel.addEventListener("click", () => {
+      input.checked = !input.checked;
+      updateToggleStyle();
+      onChange(input.checked);
+    });
+
+    slider.appendChild(knob);
+    toggleLabel.appendChild(input);
+    toggleLabel.appendChild(slider);
+
+    wrap.appendChild(labelEl);
+    wrap.appendChild(toggleLabel);
+    return wrap;
+  };
+
+  items.forEach((it) => {
+    container.appendChild(buildToggle(it.label, it.get(), it.set));
+  });
+};
+
 // 折叠设置渲染 - iOS 风格开关（带 JavaScript 交互）
 const renderCollapseSettings = () => {
   const container = document.getElementById("collapse-settings");
@@ -2964,6 +5524,16 @@ const initializeButtonStates = () => {
   updateButtonState("#toggle-auto-pause", state.autoPause);
   updateButtonState("#toggle-auto-play", state.autoPlay);
   updateButtonState("#btn-listen-mode", listenMode);
+  updatePlaybackStatusTexts();
+};
+
+const applyPlaybackDefaultsFromSettings = () => {
+  if (typeof state.settings.defaultAutoPause === "boolean") {
+    state.autoPause = state.settings.defaultAutoPause;
+  }
+  if (typeof state.settings.defaultAutoPlay === "boolean") {
+    state.autoPlay = state.settings.defaultAutoPlay;
+  }
 };
 
 const bindEditors = () => {
@@ -3229,13 +5799,13 @@ const bindInputs = () => {
   $("#toggle-auto-pause").addEventListener("click", () => {
     state.autoPause = !state.autoPause;
     updateButtonState("#toggle-auto-pause", state.autoPause);
-    $("#auto-pause-status").textContent = state.autoPause ? "⏸️ 暂停: 开" : "⏸️ 暂停: 关";
+    updatePlaybackStatusTexts();
     logEvent("autoPauseToggled", { autoPause: state.autoPause });
   });
   $("#toggle-auto-play").addEventListener("click", () => {
     state.autoPlay = !state.autoPlay;
     updateButtonState("#toggle-auto-play", state.autoPlay);
-    $("#auto-play-status").textContent = state.autoPlay ? "▶️ 自动播: 开" : "▶️ 自动播: 关";
+    updatePlaybackStatusTexts();
     logEvent("autoPlayToggled", { autoPlay: state.autoPlay });
   });
   $("#btn-export").addEventListener("click", exportSubtitles);
@@ -3251,14 +5821,11 @@ const bindInputs = () => {
   });
   $("#btn-split-sub").addEventListener("click", () => window.Split && window.Split.open());
   // 播放列表
-  $("#btn-clear-playlist").addEventListener("click", clearPlaylist);
-  // 设置
-  $("#btn-settings").addEventListener("click", async () => {
-    const modal = $("#settings-modal");
-    modal.style.display = "flex";
-    renderModelSettings();
-    await updateCacheInfo();
-  });
+  const btnClearPlaylist = $("#btn-clear-playlist");
+  if (btnClearPlaylist) {
+    btnClearPlaylist.addEventListener("click", clearPlaylist);
+  }
+
   
   // 右上角统一设置按钮
   const btnSettingsHeader = $("#btn-settings-header");
@@ -3268,6 +5835,7 @@ const bindInputs = () => {
       modal.style.display = "flex";
       renderModelSettings();
       await updateCacheInfo();
+      renderPlaybackDefaultSettings();
       // 更新折叠偏好设置
       renderCollapseSettings();
       renderReadingCollapseSettings();
@@ -3280,9 +5848,13 @@ const bindInputs = () => {
   initializeButtonStates();
   
   // 设置面板事件处理
-  $("#btn-close-settings").addEventListener("click", () => {
-    $("#settings-modal").style.display = "none";
-  });
+  const btnCloseSettings = $("#btn-close-settings");
+  const settingsModal = $("#settings-modal");
+  if (btnCloseSettings && settingsModal) {
+    btnCloseSettings.addEventListener("click", () => {
+      settingsModal.style.display = "none";
+    });
+  }
   
   // 生词本通用性设置（滑块样式）
   const checkboxCommonVocab = $("#checkbox-common-vocab");
@@ -3383,14 +5955,30 @@ const bindInputs = () => {
     // Ctrl+Z: 撤销（全局有效，包括编辑区域）
     if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
-      undo();
+      // 检查焦点是否在播放列表区域
+      const playlistEl = document.getElementById('playlist');
+      const isFocusInPlaylist = playlistEl && playlistEl.contains(document.activeElement);
+      
+      if (isFocusInPlaylist) {
+        undoPlaylist();
+      } else {
+        undo();
+      }
       return;
     }
     
     // Ctrl+Shift+Z 或 Ctrl+Y: 重做（全局有效，包括编辑区域）
     if ((e.ctrlKey || e.metaKey) && (e.shiftKey && e.key === 'z' || e.key === 'y')) {
       e.preventDefault();
-      redo();
+      // 检查焦点是否在播放列表区域
+      const playlistEl = document.getElementById('playlist');
+      const isFocusInPlaylist = playlistEl && playlistEl.contains(document.activeElement);
+      
+      if (isFocusInPlaylist) {
+        redoPlaylist();
+      } else {
+        redo();
+      }
       return;
     }
     
@@ -3516,8 +6104,6 @@ const updateCacheInfo = async () => {
   if (cacheInfoEl) {
     const data = await getCacheSize();
     const bytes = data.bytes || {};
-    const playlistCount = state.playlists.reduce((sum, pl) => sum + pl.items.length, 0);
-    const playlistNum = state.playlists.length;
     const vocabBookCount = state.vocabBooks.length;
     const vocabTotal = state.vocabBooks.reduce((sum, vb) => sum + vb.words.length, 0);
     
@@ -3538,7 +6124,6 @@ const updateCacheInfo = async () => {
     if (bytes.media > 0) html += `<strong>📁 导入文件：</strong> ${formatBytes(bytes.media)}<br>`;
     if (bytes.subtitles > 0) html += `<strong>📝 字幕数据：</strong> ${formatBytes(bytes.subtitles)}<br>`;
     html += `<strong>📚 生词本：</strong> ${vocabBookCount} 本，${vocabTotal} 词<br>`;
-    html += `<strong>▶️ 播放列表：</strong> ${playlistNum} 个列表，共 ${playlistCount} 个文件<br>`;
     
     // 添加阅读文件统计
     if (readingDocCount > 0) {
@@ -3601,8 +6186,10 @@ const formatTimeWithMs = (seconds) => {
 
 const init = async () => {
   await loadSettings();
+  applyPlaybackDefaultsFromSettings();
   await loadVocab();
-  await loadPlaylists();
+  await loadPlaylist();
+
   // 如果没有本地模型，则引导用户在设置中选择下载
   try {
     const info = await fetchModels();
@@ -3615,7 +6202,6 @@ const init = async () => {
       }
     }
   } catch (e) { /* ignore */ }
-  renderPlaylistSelector();
   renderVocabBookSelector();
   renderVocab();
   renderPlaylist();
@@ -3627,6 +6213,7 @@ const init = async () => {
   bindCollapsibles();
   renderCollapseSettings();
   renderReadingCollapseSettings();
+  renderPlaybackDefaultSettings();
 
   const player = $("#player");
   if (player) {
@@ -3661,6 +6248,37 @@ const init = async () => {
         autoScroll: true,
         autoScrollInterval: 100,
       });
+      
+      // 立即注入样式隐藏滚动条（在 ready 之前）
+      const injectScrollStyle = () => {
+        const waveformDiv = container.querySelector('div:nth-child(1)');
+        if (waveformDiv?.shadowRoot) {
+          const style = document.createElement('style');
+          style.textContent = `
+            [part="scroll"] {
+              overflow-x: hidden !important;
+              overflow-y: hidden !important;
+            }
+          `;
+          waveformDiv.shadowRoot.appendChild(style);
+          console.log('✓ 成功隐藏主波形的滚动条（创建时）');
+          return true;
+        }
+        return false;
+      };
+      
+      // 立即尝试注入
+      if (!injectScrollStyle()) {
+        // 如果 shadowRoot 还没创建，使用 MutationObserver 监听
+        const observer = new MutationObserver((mutations) => {
+          if (injectScrollStyle()) {
+            observer.disconnect();
+          }
+        });
+        observer.observe(container, { childList: true, subtree: true });
+        // 5秒后停止观察
+        setTimeout(() => observer.disconnect(), 5000);
+      }
       
       // 初始化Cursor插件 - 跟随鼠标的时间头
       // 检查是否真的加载了 Cursor 脚本
@@ -3967,6 +6585,19 @@ window.addEventListener("DOMContentLoaded", async () => {
   initReadingModule();
 });
 
+// 全局点击隐藏右键菜单
+document.addEventListener("click", (e) => {
+  if (state.contextMenu.visible && !e.target.closest(".context-menu")) {
+    hideContextMenu();
+  }
+});
+
+document.addEventListener("contextmenu", (e) => {
+  if (state.contextMenu.visible && !e.target.closest(".context-menu")) {
+    hideContextMenu();
+  }
+});
+
 const readingState = {
   currentDocId: null,
   documents: [], // 存储已导入的文档列表
@@ -4000,14 +6631,14 @@ const initModeNavigation = () => {
   if (!listeningBtn || !readingBtn) return;
   
   listeningBtn.addEventListener('click', () => {
-    listeningModule.style.display = 'grid';
+    listeningModule.style.display = 'flex';
     readingModule.style.display = 'none';
     listeningBtn.classList.add('active');
     readingBtn.classList.remove('active');
   });
   
   readingBtn.addEventListener('click', () => {
-    readingModule.style.display = 'grid';
+    readingModule.style.display = 'flex';
     listeningModule.style.display = 'none';
     readingBtn.classList.add('active');
     listeningBtn.classList.remove('active');
@@ -4081,47 +6712,131 @@ const renderReadingDocumentsList = () => {
   const listDiv = $('#reading-documents-list');
   if (!listDiv) return;
   
+  // 更新文档列表标题，显示长度
+  const documentsTitle = document.querySelector("#reading-documents-title");
+  if (documentsTitle) {
+    documentsTitle.textContent = `文档列表 (${readingState.documents.length})`;
+  }
+  
   if (readingState.documents.length === 0) {
     listDiv.innerHTML = '<p style="color: var(--muted); text-align: center; padding: 12px; font-size: 12px;">暂无文档</p>';
     return;
   }
   
-  listDiv.innerHTML = readingState.documents.map((doc, idx) => {
-    // 计算阅读进度百分比（PDF优先使用pagePercent）
-    const progressPercent = doc.readProgress?.pagePercent || doc.readProgress?.scrollPercent || 0;
-    const progressBar = progressPercent > 0 ? `<div style="height: 2px; background: var(--accent); margin-top: 6px; width: ${progressPercent}%; border-radius: 1px;"></div>` : '';
-    
-    return `
-    <div class="playlist-item ${doc.id === readingState.currentDocId ? 'active' : ''}" data-doc-id="${doc.id}">
-      <div class="playlist-item-info">
-        <div class="playlist-item-title">${doc.filename}</div>
-        <div class="playlist-item-meta">
-          ${doc.totalWords || doc.charCount || 0} 词 · ${doc.charCount || 0} 字 · ${doc.uploadTime}
-          ${progressPercent > 0 ? ` · 进度 ${Math.round(progressPercent)}%` : ''}
-        </div>
-        ${progressBar}
-      </div>
-      <button class="playlist-item-delete" data-doc-id="${doc.id}" title="删除">🗑️</button>
-    </div>
-  `}).join('');
+  // 构建树形结构
+  const treeData = buildDocumentsTree(readingState.documents);
+  
+  // 渲染树形结构
+  listDiv.innerHTML = "";
+  renderTreeNode(listDiv, treeData, "documents");
   
   // 绑定点击事件
-  listDiv.querySelectorAll('.playlist-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-      if (e.target.classList.contains('playlist-item-delete')) return;
-      const docId = item.dataset.docId;
-      loadReadingDocument(docId);
+  bindDocumentsEvents(listDiv);
+  
+  // 绑定右键菜单事件
+  bindDocumentsContextMenu(listDiv);
+  
+  // 绑定新建文件夹按钮事件
+  const createFolderBtn = document.getElementById('btn-create-folder');
+  if (createFolderBtn) {
+    createFolderBtn.addEventListener('click', async () => {
+      const folderName = prompt('请输入文件夹名称:');
+      if (folderName && folderName.trim()) {
+        await createFolder(folderName.trim());
+      }
+    });
+  }
+};
+
+const buildDocumentsTree = (documents) => {
+  const tree = { children: [], name: "root", type: "folder" };
+  
+  documents.forEach((doc) => {
+    const name = doc.filename || "";
+    const folder = doc.folder || "";
+    
+    let currentNode = tree;
+    let currentPath = "";
+    
+    // 处理文件夹路径
+    if (folder) {
+      const folderParts = folder.split(/[\\/]/);
+      folderParts.forEach((part) => {
+        if (part) {
+          currentPath = currentPath ? `${currentPath}/${part}` : part;
+          
+          let folderNode = currentNode.children.find(
+            child => child.type === "folder" && child.name === part
+          );
+          
+          if (!folderNode) {
+            folderNode = {
+              name: part,
+              type: "folder",
+              path: `documents/${currentPath}`,
+              children: [],
+              expanded: false
+            };
+            currentNode.children.push(folderNode);
+          }
+          
+          currentNode = folderNode;
+        }
+      });
+    }
+    
+    // 添加文件
+    currentNode.children.push({
+      name: name,
+      type: "file",
+      docId: doc.id,
+      doc: doc
     });
   });
   
-  // 绑定删除事件
-  listDiv.querySelectorAll('.playlist-item-delete').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const docId = btn.dataset.docId;
-      deleteReadingDocument(docId);
+  return tree.children;
+};
+
+const bindDocumentsEvents = (listDiv) => {
+  listDiv.querySelectorAll('.tree-node-content').forEach(contentEl => {
+    contentEl.addEventListener('click', (e) => {
+      if (e.target.classList.contains('tree-toggle')) return;
+      
+      const nodeEl = contentEl.closest('.tree-node');
+      const docId = nodeEl?.dataset.docId;
+      
+      if (docId) {
+        loadReadingDocument(docId);
+      }
     });
   });
+};
+
+const bindDocumentsContextMenu = (listDiv) => {
+  if (listDiv.dataset.contextMenuBound) return;
+  
+  listDiv.addEventListener("contextmenu", (e) => {
+    const contentEl = e.target.closest(".tree-node-content");
+    const nodeEl = e.target.closest(".tree-node");
+    
+    if (contentEl && nodeEl) {
+      const idx = nodeEl.dataset.index;
+      const docId = nodeEl.dataset.docId;
+      const folderName = nodeEl.dataset.folderName;
+      
+      if (docId !== undefined && docId !== null) {
+        showContextMenu(e, "documents-file", { docId: docId });
+      } else if (folderName) {
+        showContextMenu(e, "documents-folder", { name: folderName });
+      } else {
+        showContextMenu(e, "documents-root", null);
+      }
+    } else {
+      showContextMenu(e, "documents-root", null);
+    }
+  });
+  
+  listDiv.dataset.contextMenuBound = "1";
 };
 
 // 删除文档
@@ -4154,7 +6869,140 @@ const deleteReadingDocument = async (docId) => {
   }
 };
 
-const uploadReadingDocument = async (file) => {
+// 加载文档列表
+const loadReadingDocuments = async () => {
+  try {
+    const response = await fetch('/api/reading/documents');
+    const data = await response.json();
+    if (data.status === 'success' && data.documents) {
+      readingState.documents = Object.entries(data.documents).map(([id, info]) => ({
+        id,
+        filename: info.filename,
+        folder: info.folder || "",
+        charCount: info.char_count || 0,
+        totalWords: info.total_words || 0,
+        uploadTime: new Date(parseFloat(info.upload_time) * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
+        readProgress: { scrollPercent: 0, scrollPosition: 0 }
+      }));
+      localStorage.setItem('readingDocuments', JSON.stringify(readingState.documents));
+    }
+  } catch (e) {
+    console.warn('加载文档列表失败', e);
+  }
+};
+
+// 创建文件夹
+const createReadingFolder = async (folderName, parentPath = "") => {
+  try {
+    const response = await fetch('/api/reading/create-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_name: folderName, parent_path: parentPath })
+    });
+    
+    const data = await response.json();
+    if (data.status !== 'success') {
+      throw new Error(data.error || '创建文件夹失败');
+    }
+    
+    // 重新加载文档列表
+    await loadReadingDocuments();
+    renderReadingDocumentsList();
+    
+    return true;
+  } catch (err) {
+    console.error('创建文件夹失败:', err);
+    alert(`创建文件夹失败: ${err.message || err}`);
+    return false;
+  }
+};
+
+// 删除文件夹
+const deleteReadingFolder = async (folderPath) => {
+  if (!confirm('确定要删除这个文件夹吗？文件夹中的所有文件也会被删除。')) return;
+
+  try {
+    const response = await fetch('/api/reading/delete-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_path: folderPath })
+    });
+    
+    const data = await response.json();
+    if (data.status !== 'success') {
+      throw new Error(data.error || '删除文件夹失败');
+    }
+    
+    // 重新加载文档列表
+    await loadReadingDocuments();
+    renderReadingDocumentsList();
+    
+    return true;
+  } catch (err) {
+    console.error('删除文件夹失败:', err);
+    alert(`删除文件夹失败: ${err.message || err}`);
+    return false;
+  }
+};
+
+// 重命名文件夹
+const renameReadingFolder = async (oldPath, newName) => {
+  try {
+    const response = await fetch('/api/reading/rename-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_path: oldPath, new_name: newName })
+    });
+    
+    const data = await response.json();
+    if (data.status !== 'success') {
+      throw new Error(data.error || '重命名文件夹失败');
+    }
+    
+    // 重新加载文档列表
+    await loadReadingDocuments();
+    renderReadingDocumentsList();
+    
+    return true;
+  } catch (err) {
+    console.error('重命名文件夹失败:', err);
+    alert(`重命名文件夹失败: ${err.message || err}`);
+    return false;
+  }
+};
+
+// 移动文档到文件夹
+const moveDocumentToFolder = async (docId, targetFolder) => {
+  try {
+    const response = await fetch('/api/reading/move-document', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ doc_id: docId, target_folder: targetFolder })
+    });
+    
+    const data = await response.json();
+    if (data.status !== 'success') {
+      throw new Error(data.error || '移动文档失败');
+    }
+    
+    // 更新本地文档信息
+    const doc = readingState.documents.find(d => d.id === docId);
+    if (doc) {
+      doc.folder = targetFolder;
+    }
+    
+    localStorage.setItem('readingDocuments', JSON.stringify(readingState.documents));
+    renderReadingDocumentsList();
+    
+    return true;
+  } catch (err) {
+    console.error('移动文档失败:', err);
+    alert(`移动文档失败: ${err.message || err}`);
+    return false;
+  }
+};
+
+const uploadReadingDocument = async (file, folder = "") => {
   const progressContainer = $('#reading-progress-container');
   const progressText = $('#reading-progress-text');
   const progressPercent = $('#reading-progress-percent');
@@ -4166,6 +7014,7 @@ const uploadReadingDocument = async (file) => {
   try {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('folder', folder);
     
     const response = await fetch('/api/reading/upload-document', {
       method: 'POST',
@@ -4183,6 +7032,7 @@ const uploadReadingDocument = async (file) => {
       const docInfo = {
         id: data.doc_id,
         filename: data.filename,
+        folder: data.folder || folder,
         charCount: data.char_count || 0,
         totalWords: data.total_words || 0,
         uploadTime: new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
@@ -4542,7 +7392,12 @@ const handleTextSelection = () => {
     // 创建气泡框（与听力模块使用相同的样式）
     const bubble = createEl("div", "vocab-bubble");
     bubble.innerHTML = `
-      <div class="bubble-word">${readingState.selectedText}</div>
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <div class="bubble-word">${readingState.selectedText}</div>
+        <button class="bubble-lookup-btn" style="background: none; border: none; cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 3px; transition: background 0.2s;">
+          🔍
+        </button>
+      </div>
       ${vocabItem ? `<div class="bubble-meaning">${vocabItem.meaning || '未设置释义'}</div>` : ''}
       ${vocabItem && vocabItem.note ? `<div class="bubble-note"><strong>批注：</strong>${vocabItem.note}</div>` : ''}
       <div class="bubble-buttons">
@@ -4557,6 +7412,44 @@ const handleTextSelection = () => {
     bubble.style.transform = 'translateX(-50%)';
     
     document.body.appendChild(bubble);
+    
+    // 查词典功能
+    const lookupBtn = bubble.querySelector('.bubble-lookup-btn');
+    if (lookupBtn) {
+      lookupBtn.addEventListener('click', async (evt) => {
+        evt.stopPropagation();
+        evt.preventDefault();
+        
+        // 跳转到词典模块并搜索
+        bubble.remove();
+        window.getSelection().removeAllRanges();
+        
+        // 确保词典模块展开
+        const dictionaryBody = document.getElementById('reading-dictionary-body');
+        if (dictionaryBody) {
+          dictionaryBody.style.display = 'block';
+        }
+        
+        // 在词典搜索框中填入单词
+        const searchInput = document.getElementById('reading-dictionary-search-input');
+        if (searchInput) {
+          searchInput.value = readingState.selectedText;
+          searchInput.focus();
+          
+          // 触发搜索
+          const searchBtn = document.getElementById('btn-reading-dictionary-search');
+          if (searchBtn) {
+            searchBtn.click();
+          }
+        }
+        
+        // 滚动到词典模块
+        const dictionarySection = document.querySelector('#reading-dictionary-body').closest('.collapsible');
+        if (dictionarySection) {
+          dictionarySection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, true);
+    }
     
     // 编辑/添加功能
     const noteBtn = bubble.querySelector('.bubble-note-btn');
@@ -5340,15 +8233,72 @@ function deleteCurrentSubtitle() {
 
 function clearAllSubtitles() {
   if (state.subtitles.length === 0) return;
-  if (!confirm('确定清空全部字幕吗？')) return;
-  saveHistory();
+  
+  // 检查字幕数据大小，如果太大给出警告
+  const subtitlesSize = JSON.stringify(state.subtitles).length;
+  const sizeInMB = subtitlesSize / (1024 * 1024);
+  
+  if (sizeInMB > 10) { // 如果字幕数据超过10MB
+    const warningMsg = `警告：当前字幕数据较大（约 ${sizeInMB.toFixed(2)} MB），清空操作可能会消耗较多内存。\n\n确定要继续清空吗？`;
+    if (!confirm(warningMsg)) return;
+  } else {
+    if (!confirm('确定清空全部字幕吗？')) return;
+  }
+  
+  // 优化：对于空字幕或大数据量，不保存历史记录以避免内存问题
+  if (state.subtitles.length > 0 && sizeInMB < 5) {
+    saveHistory();
+  } else {
+    // 对于大数据量，直接清空历史记录以避免内存溢出
+    state.history = [];
+    state.historyIndex = -1;
+    updateHistoryButtons();
+  }
+  
+  // 先清理波形图区域，释放DOM内存
+  if (playerRegions) {
+    try {
+      playerRegions.clearRegions();
+    } catch (e) {
+      console.warn('清理波形图区域时出错:', e);
+    }
+  }
+  
+  // 清空字幕数据
+  const oldSubtitles = state.subtitles;
   state.subtitles = [];
   state.currentIndex = -1;
+  
+  // 强制垃圾回收提示（仅用于开发环境，Chrome中通过--js-flags="--expose-gc"启用）
+  if (typeof window.gc === 'function' && sizeInMB > 5) {
+    console.log('触发垃圾回收提示...');
+    try {
+      window.gc();
+    } catch (e) {
+      console.warn('垃圾回收调用失败:', e);
+    }
+  }
+  
+  // 立即同步保存到存储，确保数据持久化
   persistSubtitles();
+  
+  // 重新渲染UI
   renderSubtitles();
   renderEditors?.();
-  renderWaveformRegions();
+  
+  // 延迟渲染波形图区域，避免同时进行大量DOM操作
+  setTimeout(() => {
+    renderWaveformRegions();
+  }, 100);
+  
   updateHistoryButtons();
+  
+  // 记录清空操作
+  logEvent('subtitlesCleared', { 
+    previousCount: oldSubtitles.length, 
+    sizeInMB: sizeInMB.toFixed(2),
+    savedHistory: sizeInMB < 5
+  });
 }
 
 function openManualTimingModal() {
@@ -5377,6 +8327,38 @@ function openManualTimingModal() {
         autoScroll: true,
         autoScrollInterval: 100,
       });
+      
+      // 立即注入样式隐藏滚动条（在 ready 之前）
+      const injectManualScrollStyle = () => {
+        const waveformDiv = container.querySelector('div:nth-child(1)');
+        if (waveformDiv?.shadowRoot) {
+          const style = document.createElement('style');
+          style.textContent = `
+            [part="scroll"] {
+              overflow-x: hidden !important;
+              overflow-y: hidden !important;
+            }
+          `;
+          waveformDiv.shadowRoot.appendChild(style);
+          console.log('✓ 成功隐藏手动波形的滚动条（创建时）');
+          return true;
+        }
+        return false;
+      };
+      
+      // 立即尝试注入
+      if (!injectManualScrollStyle()) {
+        // 如果 shadowRoot 还没创建，使用 MutationObserver 监听
+        const observer = new MutationObserver((mutations) => {
+          if (injectManualScrollStyle()) {
+            observer.disconnect();
+          }
+        });
+        observer.observe(container, { childList: true, subtree: true });
+        // 5秒后停止观察
+        setTimeout(() => observer.disconnect(), 5000);
+      }
+      
       if (player?.src) {
         manualWavesurfer.load(player.src);
       }
@@ -5500,7 +8482,9 @@ function attachManualWaveScroll(container) {
     const wrapper = container.querySelector('div');
     if (wrapper && wrapper.shadowRoot) {
       const sc = wrapper.shadowRoot.querySelector('[part="scroll"]');
-      if (sc) return sc;
+      if (sc) {
+        return sc;
+      }
     }
     return container.querySelector('[part="scroll"]');
   };
@@ -5567,4 +8551,303 @@ function manualTimingLoadFromSubs() {
   manualTimingState.running = false;
   setTimingStatus('未开始');
   updateTimingLinesUI();
+}
+
+// --- 侧栏功能 ---------------------------------------------------
+
+// 初始化侧栏功能
+const initSidebar = () => {
+  // 初始化听力模块侧栏
+  initModuleSidebar('listening');
+  
+  // 初始化阅读模块侧栏
+  initModuleSidebar('reading');
+};
+
+// 初始化指定模块的侧栏
+const initModuleSidebar = (moduleName) => {
+  // 右侧栏初始化
+  const sidebarId = moduleName === 'listening' ? 'right-sidebar' : 'reading-right-sidebar';
+  const toggleId = moduleName === 'listening' ? 'sidebar-toggle' : 'reading-sidebar-toggle';
+  
+  const sidebar = document.getElementById(sidebarId);
+  const toggle = document.getElementById(toggleId);
+  
+  if (sidebar && toggle) {
+    // 加载侧栏状态
+    const sidebarState = state.settings.sidebar[moduleName];
+    if (sidebarState.collapsed) {
+      sidebar.classList.add('collapsed');
+    }
+    
+    // 绑定切换事件
+    toggle.addEventListener('click', () => {
+      toggleSidebar(moduleName, 'right');
+    });
+    
+    // 绑定功能项点击事件
+    const sidebarItems = sidebar.querySelectorAll('.sidebar-item');
+    sidebarItems.forEach(item => {
+      item.addEventListener('click', () => {
+        const module = item.dataset.module;
+        if (module) {
+          activateSidebarModule(moduleName, module, 'right');
+        }
+      });
+    });
+    
+    // 激活默认模块
+    const defaultModule = sidebarState && sidebarState.currentModule ? sidebarState.currentModule : moduleName === 'listening' ? 'control' : 'reading-dictionary';
+    activateSidebarModule(moduleName, defaultModule, 'right');
+  }
+  
+  // 左侧栏初始化
+  const leftSidebarId = moduleName === 'listening' ? 'left-sidebar' : 'reading-left-sidebar';
+  const leftToggleId = moduleName === 'listening' ? 'left-sidebar-toggle' : 'reading-left-sidebar-toggle';
+  
+  const leftSidebar = document.getElementById(leftSidebarId);
+  const leftToggle = document.getElementById(leftToggleId);
+  
+  if (leftSidebar && leftToggle) {
+    // 加载左侧栏状态
+    const leftSidebarState = state.settings.sidebar[`${moduleName}_left`];
+    if (leftSidebarState && leftSidebarState.collapsed) {
+      leftSidebar.classList.add('collapsed');
+    }
+    
+    // 绑定切换事件
+    leftToggle.addEventListener('click', () => {
+      toggleSidebar(moduleName, 'left');
+    });
+    
+    // 绑定功能项点击事件
+    const leftSidebarItems = leftSidebar.querySelectorAll('.sidebar-item');
+    leftSidebarItems.forEach(item => {
+      item.addEventListener('click', () => {
+        const module = item.dataset.module;
+        if (module) {
+          activateSidebarModule(moduleName, module, 'left');
+        }
+      });
+    });
+    
+    // 激活默认模块
+    const leftDefaultModule = leftSidebarState && leftSidebarState.currentModule ? leftSidebarState.currentModule : moduleName === 'listening' ? 'playlist' : 'documents';
+    activateSidebarModule(moduleName, leftDefaultModule, 'left');
+  }
+};
+
+// 切换侧栏收起/展开状态
+const toggleSidebar = (moduleName, position = 'right') => {
+  const sidebarId = position === 'right' ? 
+    (moduleName === 'listening' ? 'right-sidebar' : 'reading-right-sidebar') : 
+    (moduleName === 'listening' ? 'left-sidebar' : 'reading-left-sidebar');
+  
+  const sidebar = document.getElementById(sidebarId);
+  
+  if (sidebar) {
+    const isCollapsed = sidebar.classList.toggle('collapsed');
+    const sidebarKey = position === 'right' ? moduleName : `${moduleName}_left`;
+    
+    // 确保侧栏状态对象存在
+    if (!state.settings.sidebar[sidebarKey]) {
+      state.settings.sidebar[sidebarKey] = {
+        collapsed: isCollapsed,
+        currentModule: moduleName === 'listening' ? 'playlist' : 'documents'
+      };
+    } else {
+      state.settings.sidebar[sidebarKey].collapsed = isCollapsed;
+    }
+    
+    // 当侧栏展开时，激活第一个模块
+    if (!isCollapsed) {
+      const sidebarItems = sidebar.querySelectorAll('.sidebar-item');
+      if (sidebarItems.length > 0) {
+        const firstModule = sidebarItems[0].dataset.module;
+        if (firstModule) {
+          activateSidebarModule(moduleName, firstModule, position);
+        }
+      }
+    }
+    
+    persistSettings();
+  }
+};
+
+// 激活侧栏模块
+const activateSidebarModule = (moduleName, moduleId, position = 'right') => {
+  const sidebarId = position === 'right' ? 
+    (moduleName === 'listening' ? 'right-sidebar' : 'reading-right-sidebar') : 
+    (moduleName === 'listening' ? 'left-sidebar' : 'reading-left-sidebar');
+  
+  const panelId = position === 'right' ? 
+    (moduleName === 'listening' ? 'sidebar-panel' : 'reading-sidebar-panel') : 
+    (moduleName === 'listening' ? 'left-sidebar-panel' : 'reading-left-sidebar-panel');
+  
+  const sidebar = document.getElementById(sidebarId);
+  const panel = document.getElementById(panelId);
+  
+  if (sidebar && panel) {
+    // 自动展开侧栏
+    if (sidebar.classList.contains('collapsed')) {
+      sidebar.classList.remove('collapsed');
+      const sidebarKey = position === 'right' ? moduleName : `${moduleName}_left`;
+      
+      // 确保侧栏状态对象存在
+      if (!state.settings.sidebar[sidebarKey]) {
+        state.settings.sidebar[sidebarKey] = {
+          collapsed: false,
+          currentModule: moduleId
+        };
+      } else {
+        state.settings.sidebar[sidebarKey].collapsed = false;
+      }
+      
+      persistSettings();
+    }
+    
+    // 更新状态
+    const sidebarKey = position === 'right' ? moduleName : `${moduleName}_left`;
+    
+    // 确保侧栏状态对象存在
+    if (!state.settings.sidebar[sidebarKey]) {
+      state.settings.sidebar[sidebarKey] = {
+        collapsed: false,
+        currentModule: moduleId
+      };
+    } else {
+      state.settings.sidebar[sidebarKey].currentModule = moduleId;
+    }
+    
+    persistSettings();
+    
+    // 更新功能项激活状态
+    const sidebarItems = sidebar.querySelectorAll('.sidebar-item');
+    sidebarItems.forEach(item => {
+      if (item.dataset.module === moduleId) {
+        item.classList.add('active');
+      } else {
+        item.classList.remove('active');
+      }
+    });
+    
+    // 更新模块激活状态
+    const modules = panel.querySelectorAll('.sidebar-module');
+    modules.forEach(module => {
+      if (module.id === `${moduleId}-module`) {
+        module.classList.add('active');
+        // 当模块激活时，立即调整文本框高度，不需要延迟
+        initAutoResizeTextareas();
+      } else {
+        module.classList.remove('active');
+      }
+    });
+  }
+};
+
+// 自动调整文本框高度
+const autoResizeTextarea = (textarea) => {
+  if (!textarea) return;
+  
+  // 保存当前的样式
+  const originalStyle = textarea.style.cssText;
+  
+  // 重置高度，使其能够正确计算scrollHeight
+  textarea.style.height = 'auto';
+  textarea.style.overflowY = 'hidden';
+  
+  // 计算新高度，使用scrollHeight直接作为高度
+  // 这样可以确保内容完全显示
+  const newHeight = textarea.scrollHeight;
+  
+  // 限制最大高度为300px
+  const maxHeight = 300;
+  const finalHeight = Math.min(newHeight, maxHeight);
+  
+  // 设置新高度
+  textarea.style.height = finalHeight + 'px';
+  
+  // 只有当内容超过最大高度时才显示滚动条
+  textarea.style.overflowY = newHeight > maxHeight ? 'auto' : 'hidden';
+  
+  // 确保文本框的最小高度
+  const minHeight = 70; // 与CSS中的min-height保持一致
+  if (finalHeight < minHeight) {
+    textarea.style.height = minHeight + 'px';
+  }
+};
+
+// 初始化自动调整文本框高度的功能
+const initAutoResizeTextareas = () => {
+  // 使用更通用的选择器，确保找到所有相关的文本框
+  const textareas = document.querySelectorAll('textarea');
+  textareas.forEach(textarea => {
+    // 初始调整
+    autoResizeTextarea(textarea);
+    // 添加事件监听器
+    textarea.addEventListener('input', () => autoResizeTextarea(textarea));
+    textarea.addEventListener('paste', () => setTimeout(() => autoResizeTextarea(textarea), 0));
+    // 添加focus和blur事件，确保在获得和失去焦点时也能调整高度
+    textarea.addEventListener('focus', () => autoResizeTextarea(textarea));
+    textarea.addEventListener('blur', () => autoResizeTextarea(textarea));
+  });
+};
+
+// 为动态添加的文本框添加自动调整高度的功能
+const addAutoResizeToTextarea = (textarea) => {
+  if (!textarea) return;
+  
+  // 初始调整
+  autoResizeTextarea(textarea);
+  // 添加事件监听器
+  textarea.addEventListener('input', () => autoResizeTextarea(textarea));
+  textarea.addEventListener('paste', () => setTimeout(() => autoResizeTextarea(textarea), 0));
+  // 移除focus和blur事件监听器，因为我们希望文本框在显示时就调整高度，而不是等聚焦了才调整
+};
+
+// 监听DOM变化，确保动态添加的内容也能触发文本框高度调整
+const initDOMObserver = () => {
+  // 监听整个文档的变化
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      // 检查是否有新的文本框被添加
+      if (mutation.type === 'childList') {
+        const newTextareas = mutation.addedNodes.forEach((node) => {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            // 检查节点本身是否是文本框
+            if (node.tagName === 'TEXTAREA') {
+              addAutoResizeToTextarea(node);
+            }
+            // 检查节点的子元素是否有文本框
+            const textareas = node.querySelectorAll('textarea');
+            textareas.forEach(textarea => addAutoResizeToTextarea(textarea));
+          }
+        });
+      }
+      // 检查是否有文本框的内容发生了变化
+      else if (mutation.type === 'characterData' && mutation.target.parentNode && mutation.target.parentNode.tagName === 'TEXTAREA') {
+        autoResizeTextarea(mutation.target.parentNode);
+      }
+    });
+  });
+  
+  // 开始观察文档
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true
+  });
+};
+
+// 在DOM加载完成后初始化
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    initSidebar();
+    initAutoResizeTextareas();
+    initDOMObserver();
+  });
+} else {
+  initSidebar();
+  initAutoResizeTextareas();
+  initDOMObserver();
 }

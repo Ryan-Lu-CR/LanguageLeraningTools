@@ -267,12 +267,18 @@ def main():
         
         # 直接从 src/app.py 加载模块，避免静态路径导入问题
         try:
-            import importlib.util
-            app_path = Path(__file__).parent / "src" / "app.py"
-            spec = importlib.util.spec_from_file_location("app", str(app_path))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            module.app.run(host="0.0.0.0", port=5000, debug=False)
+            # 添加 src 目录到 Python 路径
+            import sys
+            sys.path.insert(0, str(Path(__file__).parent / "src"))
+            
+            # 导入 app 模块
+            import app
+            print(f"[DEBUG] App module imported successfully: {app}")
+            print(f"[DEBUG] App object: {app.app}")
+            print(f"[DEBUG] App routes: {list(app.app.url_map.iter_rules())}")
+            
+            # 启动应用
+            app.app.run(host="127.0.0.1", port=5000, debug=True)
         except KeyboardInterrupt:
             print(f"\n\n{C.GREEN}👋 应用已停止{C.RESET}")
             return 0

@@ -363,6 +363,37 @@
         autoScroll: false,
         media: player,
       });
+      
+      // 立即注入样式隐藏滚动条（在 ready 之前）
+      const injectScrollStyle = () => {
+        const waveformDiv = container.querySelector('div:nth-child(1)');
+        if (waveformDiv?.shadowRoot) {
+          const style = document.createElement('style');
+          style.textContent = `
+            [part="scroll"] {
+              overflow-x: hidden !important;
+              overflow-y: hidden !important;
+            }
+          `;
+          waveformDiv.shadowRoot.appendChild(style);
+          console.log('✓ 成功隐藏分句波形的滚动条（创建时）');
+          return true;
+        }
+        return false;
+      };
+      
+      // 立即尝试注入
+      if (!injectScrollStyle()) {
+        // 如果 shadowRoot 还没创建，使用 MutationObserver 监听
+        const observer = new MutationObserver((mutations) => {
+          if (injectScrollStyle()) {
+            observer.disconnect();
+          }
+        });
+        observer.observe(container, { childList: true, subtree: true });
+        // 5秒后停止观察
+        setTimeout(() => observer.disconnect(), 5000);
+      }
 
       if (window.WaveSurfer.Regions) {
         splitState.regions = splitState.wavesurfer.registerPlugin(window.WaveSurfer.Regions.create());

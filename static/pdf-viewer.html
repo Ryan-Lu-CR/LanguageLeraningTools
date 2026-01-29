@@ -268,6 +268,23 @@
             box-shadow: 0 4px 12px rgba(0,0,0,0.3);
         }
         
+        /* 页面占位符样式 */
+        .page-placeholder {
+            position: relative;
+            background: rgba(30, 41, 59, 0.3);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #94a3b8;
+            margin: 24px 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .page-placeholder:hover {
+            background: rgba(30, 41, 59, 0.5);
+        }
+        
         /* 划词气泡样式 - 匹配主应用风格 */
         .vocab-bubble { 
             position: fixed;
@@ -1291,117 +1308,234 @@
             pagesContainer.innerHTML = '';
             const containerWidth = container.clientWidth - 32;
             
-            // 只渲染前3页，其他页面延迟加载（快速打开）
-            const pagesToRenderNow = Math.min(3, numPages);
-            console.log(`📖 立即渲染前${pagesToRenderNow}页，共${numPages}页`);
+            // 使用视口内渲染策略：只渲染可见区域附近的页面
+            // 对于大型PDF，初始只渲染第1页，其他页面按需加载
+            const initialPages = Math.min(2, numPages); // 减少初始渲染页数
+            console.log(`📖 立即渲染前${initialPages}页，共${numPages}页（大型PDF优化模式）`);
             
-            for (let pageNum = 1; pageNum <= pagesToRenderNow; pageNum++) {
-                try {
-                    const page = await pdf.getPage(pageNum);
-                    const baseViewport = page.getViewport({ scale: 1 });
-                    
-                    let scale;
-                    if (currentScale === 'auto' || currentScale === 'fit-width') {
-                        scale = containerWidth / baseViewport.width;
-                    } else if (currentScale === 'fit-page') {
-                        // 适应页面模式：确保至少显示一整页
-                        const containerHeight = container.clientHeight - 64; // 减去padding和间距
-                        const scaleX = containerWidth / baseViewport.width;
-                        const scaleY = containerHeight / baseViewport.height;
-                        scale = Math.min(scaleX, scaleY);
-                    } else {
-                        scale = parseFloat(currentScale);
-                    }
-                    
-                    const viewport = page.getViewport({ scale });
-                    
-                    // 创建页面容器
-                    const pageWrapper = document.createElement('div');
-                    pageWrapper.className = 'page-wrapper';
-                    pageWrapper.style.width = viewport.width + 'px';
-                    pageWrapper.style.height = viewport.height + 'px';
-                    pageWrapper.dataset.pageNumber = pageNum;
-                    
-                    // 页码标签
-                    const pageLabel = document.createElement('div');
-                    pageLabel.className = 'page-number';
-                    pageLabel.textContent = `第 ${pageNum} 页`;
-                    pageWrapper.appendChild(pageLabel);
-                    
-                    // Canvas层
-                    const canvas = document.createElement('canvas');
-                    canvas.className = 'page-canvas';
-                    canvas.width = viewport.width;
-                    canvas.height = viewport.height;
-                    pageWrapper.appendChild(canvas);
-                    
-                    // 渲染PDF到Canvas
-                    const ctx = canvas.getContext('2d');
-                    await page.render({ canvasContext: ctx, viewport }).promise;
-                    
-                    // TextLayer
-                    const textLayer = document.createElement('div');
-                    textLayer.className = 'textLayer';
-                    textLayer.style.width = viewport.width + 'px';
-                    textLayer.style.height = viewport.height + 'px';
-                    textLayer.style.setProperty('--scale-factor', scale);
-                    pageWrapper.appendChild(textLayer);
-                    
-                    const textContent = await page.getTextContent();
-                    
-                    // 渲染文本层并等待完成
-                    const renderResult = pdfjsLib.renderTextLayer({
-                        textContentSource: textContent,
-                        container: textLayer,
-                        viewport,
-                        textDivs: []
-                    });
-                    
-                    // 等待renderTextLayer完成
-                    try {
-                        if (renderResult && renderResult.promise) {
-                            console.log(`⏳ 等待第${pageNum}页文本层渲染...`);
-                            await renderResult.promise;
-                            console.log(`✓ 第${pageNum}页文本层已渲染`);
-                        } else {
-                            // 如果没有promise，延迟一下让DOM更新
-                            console.log(`⏳ 第${pageNum}页无promise，等待50ms...`);
-                            await new Promise(resolve => setTimeout(resolve, 50));
-                            console.log(`✓ 第${pageNum}页延迟完成`);
-                        }
-                    } catch (e) {
-                        console.error(`⚠️ 第${pageNum}页文本层等待出错:`, e);
-                    }
-                    
-                    // 现在可以安全地进行高亮
-                    highlightVocabInPdfTextLayer(textLayer);
-                    
-                    // 为TextLayer添加划词事件
-                    textLayer.addEventListener('mouseup', showSelectionBubble);
-                    
-                    // AnnotationLayer（预留）
-                    const annotationLayer = document.createElement('div');
-                    annotationLayer.className = 'annotationLayer';
-                    pageWrapper.appendChild(annotationLayer);
-                    
-                    pagesContainer.appendChild(pageWrapper);
-                    
-                    console.log(`✅ 第${pageNum}页渲染完成`);
-                    
-                } catch (e) {
-                    console.error(`❌ 第${pageNum}页渲染失败:`, e);
-                }
+            for (let pageNum = 1; pageNum <= initialPages; pageNum++) {
+                await renderSinglePage(pageNum, containerWidth);
             }
             
-            // 延迟加载剩余页面（在后台异步加载，不阻塞UI）
-            if (pagesToRenderNow < numPages) {
-                console.log(`⏳ 将在后台加载第${pagesToRenderNow + 1}-${numPages}页`);
-                setTimeout(() => {
-                    renderRemainingPages(pagesToRenderNow + 1);
-                }, 1000);  // 从500ms增加到1000ms
-            }
+            // 使用Intersection Observer实现懒加载
+            setupLazyLoading();
             
             updateCurrentPage();
+        }
+        
+        /**
+         * 设置Intersection Observer实现页面懒加载
+         */
+        function setupLazyLoading() {
+            // 清理之前的observer
+            if (window.pdfIntersectionObserver) {
+                window.pdfIntersectionObserver.disconnect();
+            }
+            
+            // 创建新的Intersection Observer
+            window.pdfIntersectionObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const pageWrapper = entry.target;
+                        const pageNum = parseInt(pageWrapper.dataset.pageNumber);
+                        
+                        // 如果页面还没有渲染内容
+                        if (!pageWrapper.querySelector('.page-canvas')) {
+                            console.log(`👀 页面${pageNum}进入视口，开始渲染`);
+                            renderSinglePage(pageNum, container.clientWidth - 32, pageWrapper);
+                        }
+                        
+                        // 停止观察已渲染的页面
+                        window.pdfIntersectionObserver.unobserve(pageWrapper);
+                    }
+                });
+            }, {
+                root: container,
+                rootMargin: '200px', // 提前200px开始加载
+                threshold: 0.1
+            });
+            
+            // 为所有页面创建占位符并开始观察
+            for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+                // 检查是否已渲染
+                if (document.querySelector(`[data-page-number="${pageNum}"]`)) {
+                    continue;
+                }
+                
+                // 创建占位符
+                const placeholder = createPagePlaceholder(pageNum);
+                pagesContainer.appendChild(placeholder);
+                
+                // 开始观察
+                window.pdfIntersectionObserver.observe(placeholder);
+            }
+        }
+        
+        /**
+         * 创建页面占位符（用于懒加载）
+         */
+        function createPagePlaceholder(pageNum) {
+            const placeholder = document.createElement('div');
+            placeholder.className = 'page-placeholder';
+            placeholder.dataset.pageNumber = pageNum;
+            placeholder.style.width = '100%';
+            placeholder.style.height = '800px'; // 预估高度
+            placeholder.style.background = 'rgba(30, 41, 59, 0.3)';
+            placeholder.style.borderRadius = '4px';
+            placeholder.style.display = 'flex';
+            placeholder.style.alignItems = 'center';
+            placeholder.style.justifyContent = 'center';
+            placeholder.style.color = '#94a3b8';
+            placeholder.innerHTML = `<div>第 ${pageNum} 页 - 加载中...</div>`;
+            
+            return placeholder;
+        }
+        
+        /**
+         * 渲染单个页面（支持传入现有的占位符容器）
+         */
+        async function renderSinglePage(pageNum, containerWidth, existingContainer = null) {
+            try {
+                const page = await pdf.getPage(pageNum);
+                const baseViewport = page.getViewport({ scale: 1 });
+                
+                let scale;
+                if (currentScale === 'auto' || currentScale === 'fit-width') {
+                    scale = containerWidth / baseViewport.width;
+                } else if (currentScale === 'fit-page') {
+                    const containerHeight = container.clientHeight - 64;
+                    const scaleX = containerWidth / baseViewport.width;
+                    const scaleY = containerHeight / baseViewport.height;
+                    scale = Math.min(scaleX, scaleY);
+                } else {
+                    scale = parseFloat(currentScale);
+                }
+                
+                const viewport = page.getViewport({ scale });
+                
+                // 使用现有容器或创建新容器
+                let pageWrapper;
+                if (existingContainer) {
+                    pageWrapper = existingContainer;
+                    pageWrapper.className = 'page-wrapper';
+                    pageWrapper.innerHTML = ''; // 清空占位符内容
+                } else {
+                    pageWrapper = document.createElement('div');
+                    pageWrapper.className = 'page-wrapper';
+                }
+                
+                pageWrapper.style.width = viewport.width + 'px';
+                pageWrapper.style.height = viewport.height + 'px';
+                pageWrapper.dataset.pageNumber = pageNum;
+                
+                // 页码标签
+                const pageLabel = document.createElement('div');
+                pageLabel.className = 'page-number';
+                pageLabel.textContent = `第 ${pageNum} 页`;
+                pageWrapper.appendChild(pageLabel);
+                
+                // Canvas层
+                const canvas = document.createElement('canvas');
+                canvas.className = 'page-canvas';
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                pageWrapper.appendChild(canvas);
+                
+                // 使用requestIdleCallback在空闲时间渲染，避免阻塞UI
+                if ('requestIdleCallback' in window) {
+                    await new Promise((resolve) => {
+                        requestIdleCallback(async () => {
+                            const ctx = canvas.getContext('2d');
+                            await page.render({ canvasContext: ctx, viewport }).promise;
+                            resolve();
+                        }, { timeout: 1000 });
+                    });
+                } else {
+                    // 降级方案：直接渲染
+                    const ctx = canvas.getContext('2d');
+                    await page.render({ canvasContext: ctx, viewport }).promise;
+                }
+                
+                // TextLayer
+                const textLayer = document.createElement('div');
+                textLayer.className = 'textLayer';
+                textLayer.style.width = viewport.width + 'px';
+                textLayer.style.height = viewport.height + 'px';
+                textLayer.style.setProperty('--scale-factor', scale);
+                pageWrapper.appendChild(textLayer);
+                
+                const textContent = await page.getTextContent();
+                
+                // 渲染文本层
+                const renderResult = pdfjsLib.renderTextLayer({
+                    textContentSource: textContent,
+                    container: textLayer,
+                    viewport,
+                    textDivs: []
+                });
+                
+                // 等待文本层渲染完成
+                if (renderResult && renderResult.promise) {
+                    await renderResult.promise;
+                } else {
+                    await new Promise(resolve => setTimeout(resolve, 30));
+                }
+                
+                // 优化：只在页面可见时进行高亮
+                if (isElementInViewport(pageWrapper)) {
+                    highlightVocabInPdfTextLayer(textLayer);
+                } else {
+                    // 标记需要高亮，稍后处理
+                    textLayer.dataset.needsHighlight = 'true';
+                }
+                
+                // 为TextLayer添加划词事件
+                textLayer.addEventListener('mouseup', showSelectionBubble);
+                
+                // AnnotationLayer（预留）
+                const annotationLayer = document.createElement('div');
+                annotationLayer.className = 'annotationLayer';
+                pageWrapper.appendChild(annotationLayer);
+                
+                // 如果不是现有容器，添加到页面
+                if (!existingContainer) {
+                    pagesContainer.appendChild(pageWrapper);
+                }
+                
+                console.log(`✅ 第${pageNum}页渲染完成`);
+                
+            } catch (e) {
+                console.error(`❌ 第${pageNum}页渲染失败:`, e);
+            }
+        }
+        
+        /**
+         * 检查元素是否在视口内
+         */
+        function isElementInViewport(el) {
+            const rect = el.getBoundingClientRect();
+            const containerRect = container.getBoundingClientRect();
+            
+            return (
+                rect.top <= containerRect.bottom + 200 && // 提前200px
+                rect.bottom >= containerRect.top - 200 &&
+                rect.left <= containerRect.right &&
+                rect.right >= containerRect.left
+            );
+        }
+        
+        /**
+         * 检查并处理需要高亮的文本层
+         */
+        function processPendingHighlights() {
+            const textLayers = document.querySelectorAll('.textLayer[data-needs-highlight="true"]');
+            textLayers.forEach(layer => {
+                const pageWrapper = layer.closest('.page-wrapper');
+                if (pageWrapper && isElementInViewport(pageWrapper)) {
+                    highlightVocabInPdfTextLayer(layer);
+                    layer.removeAttribute('data-needs-highlight');
+                }
+            });
         }
         
         /**
@@ -1759,7 +1893,12 @@
             debouncedSavePdfCache();
             // 防抖保存进度（每1.5秒保存一次）
             debouncedSavePdfProgress();
+            // 处理待处理的高亮
+            processPendingHighlights();
         });
+        
+        // 添加滚动事件监听器来处理动态高亮
+        container.addEventListener('scroll', processPendingHighlights);
         
         // 页面卸载时立即保存进度
         window.addEventListener('beforeunload', () => {

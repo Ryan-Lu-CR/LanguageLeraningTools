@@ -40,6 +40,31 @@ try:
 except ImportError:
     ebooklib_epub = None
 
+try:
+    import pymorphy2  # type: ignore
+except ImportError:
+    pymorphy2 = None
+
+# pymorphy2 兼容性补丁（修复 Python 3.11+ 的 getargspec 问题）
+if pymorphy2 is not None:
+    try:
+        import inspect
+        if not hasattr(inspect, 'getargspec'):
+            def getargspec(func):
+                try:
+                    spec = inspect.getfullargspec(func)
+                    from collections import namedtuple
+                    ArgSpec = namedtuple('ArgSpec', 'args varargs keywords defaults')
+                    return ArgSpec(spec.args, spec.varargs, spec.varkw, spec.defaults)
+                except Exception:
+                    from collections import namedtuple
+                    ArgSpec = namedtuple('ArgSpec', 'args varargs keywords defaults')
+                    return ArgSpec([], None, None, None)
+            inspect.getargspec = getargspec
+            print("✓ pymorphy2 兼容性补丁已加载")
+    except Exception as e:
+        print(f"⚠️ pymorphy2 兼容性补丁加载失败: {e}")
+
 app = Flask(
     __name__,
     static_folder=str(Path(__file__).parent.parent / "static"),
@@ -257,8 +282,13 @@ def run_whisper_transcribe(tmp_path: Path, language: str | None = None) -> Dict[
 
 # --- Document Processing Helpers -------------------------------------------
 
-def extract_text_from_pdf(file_path: str) -> str:
-    """从PDF文件提取文本并以分页HTML形式返回，保持原有排版（逐页展示）"""
+def extract_text_from_pdf(file_path: str, max_pages: int = 50) -> str:
+    """从PDF文件提取文本并以分页HTML形式返回，保持原有排版（逐页展示）
+    
+    参数:
+        file_path: PDF文件路径
+        max_pages: 最大提取页数（防止大型PDF内存溢出），0表示无限制
+    """
     if PyPDF2 is None:
         raise ImportError("PyPDF2 not installed. Please install it: pip install PyPDF2")
     
@@ -267,6 +297,12 @@ def extract_text_from_pdf(file_path: str) -> str:
         with open(file_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
             total_pages = len(pdf_reader.pages)
+            
+            # 限制处理页数，防止大型PDF导致内存溢出
+            if max_pages > 0 and total_pages > max_pages:
+                print(f"⚠️ PDF过大 ({total_pages}页)，仅提取前{max_pages}页")
+                total_pages = max_pages
+            
             for page_num in range(total_pages):
                 page = pdf_reader.pages[page_num]
                 text = page.extract_text() or ""
@@ -298,9 +334,23 @@ def extract_text_from_epub(file_path: str) -> str:
         import hashlib
         import io
         
+        # 确保USER_DATA_DIR可见
+        global USER_DATA_DIR
+        
+        print(f"DEBUG: USER_DATA_DIR = {USER_DATA_DIR}")
         epub_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
-        images_dir = Path("static") / "reading_images" / epub_hash
-        images_dir.mkdir(parents=True, exist_ok=True)
+        print(f"DEBUG: epub_hash = {epub_hash}")
+        
+        # 使用绝对路径保存图片到user_data\readings目录
+        images_dir = USER_DATA_DIR / "readings" / "reading_images" / epub_hash
+        print(f"DEBUG: images_dir = {images_dir}")
+        
+        try:
+            images_dir.mkdir(parents=True, exist_ok=True)
+            print(f"DEBUG: 图片目录创建成功: {images_dir}")
+        except Exception as e:
+            print(f"DEBUG: 图片目录创建失败: {e}")
+            raise
         
         image_mapping = {}  # 映射：文件名 -> 新URL
         
@@ -345,7 +395,7 @@ def extract_text_from_epub(file_path: str) -> str:
                         f.write(content)
                     
                     # 建立映射：文件名 -> URL
-                    new_url = f"/static/reading_images/{epub_hash}/{filename}"
+                    new_url = f"/api/reading/image/{epub_hash}/{filename}"
                     image_mapping[filename] = new_url
                     
                     print(f"✓ 提取图片: {filename} -> {new_url}")
@@ -726,8 +776,10 @@ def generate_subtitles():
             for seg in result.get("segments", [])
         ]
         
-        # 保存生成的字幕到用户数据文件夹
-        subtitle_path = get_user_file_path(f"{base_name}.json", "subtitles")
+        # 保存生成的字幕到媒体文件所在目录
+        media_path = tmp_path.parent
+        subtitle_path = media_path / f"{base_name}.json"
+        subtitle_path.parent.mkdir(parents=True, exist_ok=True)
         with open(subtitle_path, "w", encoding="utf-8") as f:
             json.dump(subtitles, f, ensure_ascii=False, indent=2)
         print(f"✓ 字幕已保存: {subtitle_path}")
@@ -752,7 +804,27 @@ def save_subtitles():
         subtitles = payload.get("subtitles", [])
         
         base_name = Path(media_name).stem
-        subtitle_path = get_user_file_path(f"{base_name}.json", "subtitles")
+        
+        # 尝试在多个位置查找媒体文件
+        possible_paths = [
+            USER_DATA_DIR / "media" / media_name,
+            USER_DATA_DIR / media_name,
+            Path("user_data") / "media" / media_name,
+            Path("user_data") / media_name,
+        ]
+        
+        media_path = None
+        for path in possible_paths:
+            if path.exists():
+                media_path = path.parent
+                break
+        
+        # 如果找不到媒体文件，默认保存到 media 目录
+        if media_path is None:
+            media_path = get_user_file_path("", "media")
+        
+        subtitle_path = media_path / f"{base_name}.json"
+        subtitle_path.parent.mkdir(parents=True, exist_ok=True)
         
         with open(subtitle_path, "w", encoding="utf-8") as f:
             json.dump(subtitles, f, ensure_ascii=False, indent=2)
@@ -762,12 +834,134 @@ def save_subtitles():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
-@app.route("/api/subtitles/load/<filename>", methods=["GET"])
+@app.route("/api/subtitles/scan", methods=["GET"])
+def scan_subtitle_files():
+    """扫描媒体文件所在目录的字幕文件"""
+    try:
+        media_name = request.args.get("media", "")
+        if not media_name:
+            return jsonify({"status": "error", "error": "media parameter required"}), 400
+        
+        from urllib.parse import unquote
+        media_name = unquote(media_name)
+        media_base = Path(media_name).stem
+        
+        # 尝试在多个位置查找媒体文件
+        possible_paths = [
+            USER_DATA_DIR / "media" / media_name,
+            USER_DATA_DIR / media_name,
+            Path("user_data") / "media" / media_name,
+            Path("user_data") / media_name,
+        ]
+        
+        media_path = None
+        for path in possible_paths:
+            if path.exists():
+                media_path = path.parent
+                break
+        
+        # 如果找不到媒体文件，使用 media 目录
+        if media_path is None:
+            media_path = get_user_file_path("", "media")
+        
+        if not media_path.exists():
+            return jsonify({"status": "not_found", "files": []})
+        
+        found_files = []
+        
+        for item in media_path.iterdir():
+            if item.is_file() and item.suffix.lower() in ['.srt', '.vtt', '.ass', '.ssa', '.json']:
+                file_base = item.stem
+                if file_base == media_base:
+                    found_files.append({
+                        "filename": item.name,
+                        "format": item.suffix.lower()[1:],
+                        "size": item.stat().st_size
+                    })
+        
+        print(f"[DEBUG] scan_subtitle_files: media_name={media_name}, media_base={media_base}, media_path={media_path}, found_files={found_files}")
+        return jsonify({"status": "success", "files": found_files})
+    except Exception as e:
+        print(f"[DEBUG] scan_subtitle_files error: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/subtitles/load-file/<path:filename>", methods=["GET"])
+def load_subtitle_file(filename):
+    """加载并解析媒体文件所在目录的字幕文件"""
+    try:
+        from urllib.parse import unquote
+        filename = unquote(filename)
+        
+        # 尝试在多个位置查找媒体文件
+        possible_paths = [
+            USER_DATA_DIR / "media" / filename,
+            USER_DATA_DIR / filename,
+            Path("user_data") / "media" / filename,
+            Path("user_data") / filename,
+        ]
+        
+        subtitle_path = None
+        for path in possible_paths:
+            if path.exists():
+                subtitle_path = path
+                break
+        
+        # 如果找不到，尝试在 subtitles 目录查找（向后兼容）
+        if subtitle_path is None or not subtitle_path.exists():
+            subtitle_path = get_user_file_path(filename, "subtitles")
+        
+        if not subtitle_path.exists():
+            return jsonify({"status": "not_found", "subtitles": []}), 404
+        
+        suffix = subtitle_path.suffix.lower()
+        
+        subtitles = []
+        if suffix == '.json':
+            with open(subtitle_path, "r", encoding="utf-8") as f:
+                subtitles = json.load(f)
+        elif suffix == '.srt':
+            with open(subtitle_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            subtitles = parse_srt(content)
+        elif suffix == '.vtt':
+            with open(subtitle_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            subtitles = parse_vtt(content)
+        elif suffix in ['.ass', '.ssa']:
+            return jsonify({"status": "error", "error": "ASS/SSA format not supported yet"}), 400
+        
+        return jsonify({"status": "success", "subtitles": subtitles})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/subtitles/load/<path:filename>", methods=["GET"])
 def load_subtitles(filename):
     """加载保存的字幕文件"""
     try:
+        from urllib.parse import unquote
+        filename = unquote(filename)
         base_name = Path(filename).stem
-        subtitle_path = get_user_file_path(f"{base_name}.json", "subtitles")
+        
+        # 尝试在多个位置查找媒体文件和字幕文件
+        possible_paths = [
+            USER_DATA_DIR / "media" / filename,
+            USER_DATA_DIR / filename,
+            Path("user_data") / "media" / filename,
+            Path("user_data") / filename,
+        ]
+        
+        subtitle_path = None
+        for path in possible_paths:
+            # 查找同目录下的字幕文件
+            subtitle_path = path.parent / f"{base_name}.json"
+            if subtitle_path.exists():
+                break
+        
+        # 如果找不到，尝试在 subtitles 目录查找（向后兼容）
+        if subtitle_path is None or not subtitle_path.exists():
+            subtitle_path = get_user_file_path(f"{base_name}.json", "subtitles")
         
         if subtitle_path.exists():
             with open(subtitle_path, "r", encoding="utf-8") as f:
@@ -777,6 +971,69 @@ def load_subtitles(filename):
             return jsonify({"status": "not_found", "subtitles": []}), 404
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+def parse_srt(content: str) -> List[Dict[str, Any]]:
+    """解析 SRT 格式字幕"""
+    subtitles = []
+    pattern = re.compile(r'(\d+)\s*\n(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*\n(.*?)(?=\n\n|\n\d+\s*\n|\Z)', re.DOTALL)
+    
+    for match in pattern.finditer(content):
+        start = int(match.group(2)) * 3600 + int(match.group(3)) * 60 + int(match.group(4)) + int(match.group(5)) / 1000
+        end = int(match.group(6)) * 3600 + int(match.group(7)) * 60 + int(match.group(8)) + int(match.group(9)) / 1000
+        text = match.group(10).strip().replace('\n', ' ')
+        
+        subtitles.append({
+            "start": start,
+            "end": end,
+            "text": text
+        })
+    
+    return subtitles
+
+
+def parse_vtt(content: str) -> List[Dict[str, Any]]:
+    """解析 VTT 格式字幕"""
+    subtitles = []
+    lines = content.split('\n')
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        if '-->' in line:
+            time_match = re.match(r'(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})', line)
+            if not time_match:
+                time_match = re.match(r'(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2})\.(\d{3})', line)
+            
+            if time_match:
+                groups = time_match.groups()
+                if len(groups) == 8:
+                    start = int(groups[0]) * 3600 + int(groups[1]) * 60 + int(groups[2]) + int(groups[3]) / 1000
+                    end = int(groups[4]) * 3600 + int(groups[5]) * 60 + int(groups[6]) + int(groups[7]) / 1000
+                else:
+                    start = int(groups[0]) * 60 + int(groups[1]) + int(groups[2]) / 1000
+                    end = int(groups[3]) * 60 + int(groups[4]) + int(groups[5]) / 1000
+                
+                i += 1
+                text_lines = []
+                while i < len(lines) and lines[i].strip() and not '-->' in lines[i]:
+                    text_lines.append(lines[i].strip())
+                    i += 1
+                
+                text = ' '.join(text_lines)
+                if text:
+                    subtitles.append({
+                        "start": start,
+                        "end": end,
+                        "text": text
+                    })
+            else:
+                i += 1
+        else:
+            i += 1
+    
+    return subtitles
 
 
 @app.route("/api/media/upload", methods=["POST"])
@@ -790,14 +1047,36 @@ def upload_media():
         if not media_file.filename:
             return jsonify({"error": "no filename", "status": "error"}), 400
         
-        # 保存到 user_data/media 文件夹
-        media_path = get_user_file_path(media_file.filename, "media")
+        # 获取路径参数
+        path = request.form.get("path", "")
+        
+        # 构建完整的保存路径
+        if path:
+            # 确保路径以 '/' 结尾
+            if not path.endswith('/'):
+                path += '/'
+            # 保存到 user_data/media/[path] 文件夹
+            media_path = get_user_file_path(path + media_file.filename, "media")
+        else:
+            # 保存到 user_data/media 根文件夹
+            media_path = get_user_file_path(media_file.filename, "media")
+        
+        # 确保目录存在
+        media_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 保存文件
         media_file.save(str(media_path))
+        
+        # 构建返回的文件名（包含路径）
+        if path:
+            return_filename = path + media_file.filename
+        else:
+            return_filename = media_file.filename
         
         return jsonify({
             "status": "success",
             "path": str(media_path),
-            "filename": media_file.filename
+            "filename": return_filename
         })
     except Exception as e:
         # 打印详细错误以便前端提示
@@ -805,10 +1084,12 @@ def upload_media():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
-@app.route("/api/media/load/<filename>", methods=["GET"])
+@app.route("/api/media/load/<path:filename>", methods=["GET"])
 def load_media(filename):
     """从服务器加载媒体文件"""
     try:
+        from urllib.parse import unquote
+        filename = unquote(filename)
         media_path = get_user_file_path(filename, "media")
         
         if media_path.exists():
@@ -819,6 +1100,97 @@ def load_media(filename):
             )
         else:
             return jsonify({"status": "not_found"}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/media/scan", methods=["GET"])
+def scan_media_files():
+    """扫描本地媒体文件和文件夹的变化"""
+    print("[DEBUG] scan_media_files endpoint called")
+    try:
+        media_dir = get_user_file_path("", "media")
+        print(f"[DEBUG] Media directory: {media_dir}")
+        print(f"[DEBUG] Media directory exists: {media_dir.exists()}")
+        if not media_dir.exists():
+            return jsonify({"status": "success", "files": [], "folders": []})
+        
+        files = []
+        folders = []
+        
+        # 递归扫描目录
+        def scan_directory(path, relative_path=""):
+            for item in path.iterdir():
+                if item.is_dir():
+                    folder_path = relative_path + item.name + "/"
+                    folders.append(folder_path)
+                    scan_directory(item, folder_path)
+                else:
+                    file_path = relative_path + item.name
+                    files.append({
+                        "path": file_path,
+                        "size": item.stat().st_size,
+                        "mtime": item.stat().st_mtime
+                    })
+        
+        scan_directory(media_dir)
+        print(f"[DEBUG] Found {len(files)} files and {len(folders)} folders")
+        
+        return jsonify({
+            "status": "success",
+            "files": files,
+            "folders": folders
+        })
+    except Exception as e:
+        print(f"[DEBUG] Error in scan_media_files: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/media/clear", methods=["POST"])
+def clear_media():
+    """清空媒体文件夹"""
+    try:
+        media_dir = get_user_file_path("", "media")
+        
+        if not media_dir.exists():
+            return jsonify({"status": "success"})
+        
+        # 递归删除所有内容
+        import shutil
+        for item in media_dir.iterdir():
+            if item.is_dir():
+                shutil.rmtree(str(item))
+            else:
+                item.unlink()
+        
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/media/delete", methods=["POST"])
+def delete_media():
+    """删除指定的媒体文件或文件夹"""
+    try:
+        payload = request.get_json()
+        filename = payload.get("filename")
+        
+        if not filename:
+            return jsonify({"status": "error", "error": "文件名不能为空"}), 400
+        
+        media_dir = get_user_file_path("", "media")
+        file_path = media_dir / filename
+        
+        if not file_path.exists():
+            return jsonify({"status": "error", "error": "文件不存在"}), 404
+        
+        import shutil
+        if file_path.is_dir():
+            shutil.rmtree(str(file_path))
+        else:
+            file_path.unlink()
+        
+        return jsonify({"status": "success"})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
@@ -901,49 +1273,7 @@ def load_vocabbooks():
         return jsonify({"status": "error", "error": str(e), "vocabBooks": [], "currentVocabBookId": None}), 500
 
 
-@app.route("/api/playlists/save", methods=["POST"])
-def save_playlists():
-    """保存播放列表数据到文件"""
-    try:
-        payload = request.get_json(force=True)
-        playlists = payload.get("playlists", [])
-        current_id = payload.get("currentPlaylistId", None)
-        
-        # 保存播放列表数据
-        playlists_path = get_user_file_path("playlists.json", "playlists")
-        with open(playlists_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "playlists": playlists,
-                "currentPlaylistId": current_id
-            }, f, ensure_ascii=False, indent=2)
-        
-        return jsonify({"status": "success", "path": str(playlists_path)})
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
 
-
-@app.route("/api/playlists/load", methods=["GET"])
-def load_playlists():
-    """加载保存的播放列表数据"""
-    try:
-        playlists_path = get_user_file_path("playlists.json", "playlists")
-        
-        if playlists_path.exists():
-            with open(playlists_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return jsonify({
-                "status": "success",
-                "playlists": data.get("playlists", []),
-                "currentPlaylistId": data.get("currentPlaylistId", None)
-            })
-        else:
-            return jsonify({
-                "status": "success",
-                "playlists": [],
-                "currentPlaylistId": None
-            })
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e), "playlists": [], "currentPlaylistId": None}), 500
 
 
 @app.route("/api/settings/save", methods=["POST"])
@@ -976,6 +1306,245 @@ def load_settings():
             return jsonify({"status": "success", "settings": {}})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e), "settings": {}}), 500
+
+
+@app.route("/api/playlist/save", methods=["POST"])
+def save_playlist():
+    """保存播放列表到文件"""
+    try:
+        payload = request.get_json(force=True)
+        playlist = payload.get("playlist", [])
+        current_index = payload.get("currentPlaylistIndex", -1)
+        
+        playlist_data = {
+            "playlist": playlist,
+            "currentPlaylistIndex": current_index
+        }
+        
+        playlist_path = get_user_file_path("playlist.json", "settings")
+        with open(playlist_path, "w", encoding="utf-8") as f:
+            json.dump(playlist_data, f, ensure_ascii=False, indent=2)
+        
+        return jsonify({"status": "success", "path": str(playlist_path)})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/playlist/load", methods=["GET"])
+def load_playlist():
+    """加载保存的播放列表"""
+    try:
+        playlist_path = get_user_file_path("playlist.json", "settings")
+        
+        if playlist_path.exists():
+            with open(playlist_path, "r", encoding="utf-8") as f:
+                playlist_data = json.load(f)
+            return jsonify({
+                "status": "success",
+                "playlist": playlist_data.get("playlist", []),
+                "currentPlaylistIndex": playlist_data.get("currentPlaylistIndex", -1)
+            })
+        else:
+            return jsonify({
+                "status": "success",
+                "playlist": [],
+                "currentPlaylistIndex": -1
+            })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e), "playlist": [], "currentPlaylistIndex": -1}), 500
+
+
+@app.route("/api/playlist/create-folder", methods=["POST"])
+def create_playlist_folder():
+    """创建播放列表文件夹"""
+    try:
+        import json
+        
+        # 直接使用 request.get_json()，Flask 会自动处理编码
+        payload = request.get_json()
+        folder_name = payload.get("folder_name")
+        
+        print(f"[create_folder] 收到的文件夹名称: {folder_name}, 类型: {type(folder_name)}")
+        print(f"[create_folder] 文件夹名称编码: {folder_name.encode('utf-8') if folder_name else None}")
+        
+        if not folder_name:
+            return jsonify({"status": "error", "error": "文件夹名称不能为空"}), 400
+        
+        import os
+        base_dir = get_user_file_path("", "media")
+        folder_path = os.path.join(str(base_dir), folder_name)
+        
+        print(f"[create_folder] 完整路径: {folder_path}")
+        print(f"[create_folder] 路径编码: {folder_path.encode('utf-8')}")
+        
+        if os.path.exists(folder_path):
+            return jsonify({"status": "error", "error": "文件夹已存在"}), 400
+        
+        os.makedirs(folder_path, exist_ok=True)
+        
+        print(f"[create_folder] 文件夹创建成功: {folder_name}")
+        
+        return jsonify({
+            "status": "success",
+            "folder_path": folder_name
+        })
+    except Exception as e:
+        print(f"[create_folder] 错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/playlist/move-item", methods=["POST"])
+def move_playlist_item():
+    """移动播放列表项到文件夹"""
+    try:
+        payload = request.get_json(force=True)
+        source_name = payload.get("source_name")
+        target_folder = payload.get("target_folder")
+        
+        if not source_name:
+            return jsonify({"status": "error", "error": "源文件名不能为空"}), 400
+        
+        if not target_folder:
+            return jsonify({"status": "error", "error": "目标文件夹不能为空"}), 400
+        
+        base_dir = get_user_file_path("", "media")
+        source_path = base_dir / source_name
+        target_path = base_dir / target_folder / source_name.split("/")[-1]
+        
+        if not source_path.exists():
+            return jsonify({"status": "error", "error": "源文件不存在"}), 404
+        
+        if not target_path.parent.exists():
+            return jsonify({"status": "error", "error": "目标文件夹不存在"}), 404
+        
+        # 移动文件或文件夹
+        import shutil
+        if source_path.is_dir():
+            shutil.move(str(source_path), str(target_path))
+        else:
+            shutil.move(str(source_path), str(target_path))
+        
+        return jsonify({
+            "status": "success",
+            "source": source_name,
+            "target": f"{target_folder}/{source_name.split('/')[-1]}"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/playlist/delete-folder", methods=["POST"])
+def delete_playlist_folder():
+    """删除播放列表文件夹"""
+    try:
+        payload = request.get_json(force=True)
+        folder_name = payload.get("folder_name")
+        
+        if not folder_name:
+            return jsonify({"status": "error", "error": "文件夹名称不能为空"}), 400
+        
+        base_dir = get_user_file_path("", "media")
+        folder_path = base_dir / folder_name
+        
+        if not folder_path.exists():
+            return jsonify({"status": "error", "error": "文件夹不存在"}), 404
+        
+        # 递归删除文件夹
+        import shutil
+        shutil.rmtree(str(folder_path))
+        
+        return jsonify({
+            "status": "success",
+            "folder_name": folder_name
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/playlist/rename-folder", methods=["POST"])
+def rename_playlist_folder():
+    """重命名播放列表文件夹"""
+    try:
+        payload = request.get_json(force=True)
+        old_name = payload.get("old_name")
+        new_name = payload.get("new_name")
+        
+        if not old_name:
+            return jsonify({"status": "error", "error": "旧文件夹名称不能为空"}), 400
+        
+        if not new_name:
+            return jsonify({"status": "error", "error": "新文件夹名称不能为空"}), 400
+        
+        base_dir = get_user_file_path("", "media")
+        old_path = base_dir / old_name
+        new_path = base_dir / new_name
+        
+        if not old_path.exists():
+            return jsonify({"status": "error", "error": "文件夹不存在"}), 404
+        
+        if new_path.exists():
+            return jsonify({"status": "error", "error": "文件夹已存在"}), 400
+        
+        old_path.rename(new_path)
+        
+        return jsonify({
+            "status": "success",
+            "old_name": old_name,
+            "new_name": new_name
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/playlist/scan", methods=["GET"])
+def scan_playlist():
+    """扫描播放列表文件夹结构"""
+    try:
+        media_dir = get_user_file_path("", "media")
+        
+        if not media_dir.exists():
+            return jsonify({
+                "status": "success",
+                "playlist": []
+            })
+        
+        playlist = []
+        
+        # 递归扫描目录
+        def scan_directory(path, relative_path=""):
+            for item in path.iterdir():
+                item_name = item.name
+                item_relative_path = relative_path + item_name
+                
+                if item.is_dir():
+                    # 添加文件夹
+                    playlist.append({
+                        "name": item_relative_path + "/",
+                        "type": "folder",
+                        "url": None,
+                        "serverPath": item_relative_path + "/"
+                    })
+                    # 递归扫描子文件夹
+                    scan_directory(item, item_relative_path + "/")
+                else:
+                    # 添加文件
+                    playlist.append({
+                        "name": item_relative_path,
+                        "type": "file",
+                        "url": None,
+                        "serverPath": item_relative_path
+                    })
+        
+        scan_directory(media_dir)
+        
+        return jsonify({
+            "status": "success",
+            "playlist": playlist
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e), "playlist": []}), 500
 
 
 # --- Reading Module Routes --------------------------------------------------
@@ -1043,10 +1612,14 @@ def serve_raw_document(doc_id):
                 return response
 
         # 否则返回原文件
-        file_path = base_dir / filename
+        folder = meta.get("folder", "")
+        file_path = base_dir / folder / filename
         if not file_path.exists():
-            print(f"[serve_raw_document] ❌ 文件不存在: {file_path}")
-            return jsonify({"status": "error", "error": "文件已丢失"}), 404
+            # 尝试在根目录查找（兼容旧数据）
+            file_path = base_dir / filename
+            if not file_path.exists():
+                print(f"[serve_raw_document] ❌ 文件不存在: {file_path}")
+                return jsonify({"status": "error", "error": "文件已丢失"}), 404
 
         file_size = file_path.stat().st_size
         print(f"[serve_raw_document] 文件路径: {file_path}")
@@ -1102,12 +1675,15 @@ def upload_document():
         if file.filename == '':
             return jsonify({"status": "error", "error": "文件名为空"}), 400
         
+        # 获取目标文件夹（如果有）
+        folder = request.form.get("folder", "")
+        
         # 保存临时文件
         temp_dir = get_user_file_path("", "readings")
         temp_dir.mkdir(exist_ok=True)
         
         file_ext = Path(file.filename).suffix.lower()
-        temp_path = temp_dir / file.filename
+        temp_path = temp_dir / f"temp_{os.urandom(8).hex()}{file_ext}"
         file.save(str(temp_path))
         
         print(f"📄 Processing document: {file.filename}")
@@ -1135,13 +1711,22 @@ def upload_document():
         # 生成doc_id
         doc_id = file.filename.replace(' ', '_').replace('.', '_')
 
+        # 保存文档到指定文件夹
+        base_dir = get_user_file_path("", "readings")
+        target_dir = base_dir / folder
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 移动文件到目标文件夹
+        final_file_path = target_dir / file.filename
+        temp_path.rename(final_file_path)
+
         # 若为 Word，尝试转换为 PDF 以保留样式（需 docx2pdf，可能在无 Office 环境下失败）
         converted_pdf_path = None
         if file_ext in [".doc", ".docx"]:
             try:
                 from docx2pdf import convert  # type: ignore
                 out_pdf = get_user_file_path(f"{doc_id}.pdf", "readings")
-                convert(str(temp_path), str(out_pdf))
+                convert(str(final_file_path), str(out_pdf))
                 if out_pdf.exists():
                     converted_pdf_path = out_pdf
                     print(f"✓ Word 转 PDF 成功: {out_pdf}")
@@ -1152,10 +1737,11 @@ def upload_document():
         total_words = count_total_words(text)
         doc_metadata = {
             "filename": file.filename,
+            "folder": folder,
             "size": len(text),
             "char_count": len(text),
             "total_words": total_words,
-            "upload_time": str(Path(temp_path).stat().st_mtime),
+            "upload_time": str(final_file_path.stat().st_mtime),
             "ext": file_ext,
             "converted_pdf": str(converted_pdf_path) if converted_pdf_path else None
         }
@@ -1181,6 +1767,7 @@ def upload_document():
             "status": "success",
             "doc_id": doc_id,
             "filename": file.filename,
+            "folder": folder,
             "char_count": len(text),
             "total_words": total_words,
             "size": len(text),
@@ -1225,6 +1812,36 @@ def load_document(doc_id):
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/api/reading/image/<epub_hash>/<filename>", methods=["GET"])
+def serve_epub_image(epub_hash, filename):
+    """提供EPUB提取的图片访问"""
+    try:
+        print(f"DEBUG: 收到图片请求: epub_hash={epub_hash}, filename={filename}")
+        
+        # 构建图片路径
+        image_path = USER_DATA_DIR / "readings" / "reading_images" / epub_hash / filename
+        print(f"DEBUG: 图片路径: {image_path}")
+        
+        if not image_path.exists():
+            print(f"DEBUG: 图片不存在: {image_path}")
+            return jsonify({"status": "error", "error": "图片不存在"}), 404
+        
+        # 猜测MIME类型
+        guessed_type, _ = mimetypes.guess_type(str(image_path))
+        if not guessed_type:
+            guessed_type = "application/octet-stream"
+        print(f"DEBUG: MIME类型: {guessed_type}")
+        
+        return send_file(
+            image_path,
+            mimetype=guessed_type,
+            as_attachment=False
+        )
+    except Exception as e:
+        print(f"DEBUG: 图片服务错误: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route("/api/reading/delete-document/<doc_id>", methods=["DELETE"])
 def delete_document(doc_id):
     """删除指定文档及其相关文件（内容、笔记、原文件、提取图片、转换后的PDF）"""
@@ -1262,7 +1879,8 @@ def delete_document(doc_id):
                     pass
 
         base_dir = get_user_file_path("", "readings")
-        file_path = base_dir / filename
+        folder = documents[doc_id].get("folder", "")
+        file_path = base_dir / folder / filename
 
         # 相关文件路径
         content_path = get_user_file_path(f"{doc_id}_content.json", "readings")
@@ -1271,7 +1889,7 @@ def delete_document(doc_id):
 
         # EPUB 图片目录（与提取时一致的 hash 规则）
         epub_hash = hashlib.md5(str(file_path).encode()).hexdigest()[:8]
-        images_dir = Path("static") / "reading_images" / epub_hash
+        images_dir = USER_DATA_DIR / "readings" / "reading_images" / epub_hash
 
         # 删除文件/目录
         for p in [file_path, content_path, notes_path, images_dir, converted_pdf_path]:
@@ -1300,6 +1918,168 @@ def list_documents():
         return jsonify({
             "status": "success",
             "documents": documents
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/reading/create-folder", methods=["POST"])
+def create_folder():
+    """创建新文件夹"""
+    try:
+        payload = request.get_json(force=True)
+        folder_name = payload.get("folder_name")
+        parent_path = payload.get("parent_path", "")
+        
+        if not folder_name:
+            return jsonify({"status": "error", "error": "文件夹名称不能为空"}), 400
+        
+        base_dir = get_user_file_path("", "readings")
+        folder_path = base_dir / parent_path / folder_name
+        
+        if folder_path.exists():
+            return jsonify({"status": "error", "error": "文件夹已存在"}), 400
+        
+        folder_path.mkdir(parents=True, exist_ok=True)
+        
+        return jsonify({
+            "status": "success",
+            "folder_path": str(folder_path.relative_to(base_dir))
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/reading/delete-folder", methods=["POST"])
+def delete_folder():
+    """删除文件夹"""
+    try:
+        payload = request.get_json(force=True)
+        folder_path = payload.get("folder_path")
+        
+        if not folder_path:
+            return jsonify({"status": "error", "error": "文件夹路径不能为空"}), 400
+        
+        base_dir = get_user_file_path("", "readings")
+        folder_full_path = base_dir / folder_path
+        
+        if not folder_full_path.exists() or not folder_full_path.is_dir():
+            return jsonify({"status": "error", "error": "文件夹不存在"}), 404
+        
+        import shutil
+        shutil.rmtree(folder_full_path)
+        
+        return jsonify({
+            "status": "success",
+            "message": "文件夹删除成功"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/reading/rename-folder", methods=["POST"])
+def rename_folder():
+    """重命名文件夹"""
+    try:
+        payload = request.get_json(force=True)
+        old_path = payload.get("old_path")
+        new_name = payload.get("new_name")
+        
+        if not old_path or not new_name:
+            return jsonify({"status": "error", "error": "参数不能为空"}), 400
+        
+        base_dir = get_user_file_path("", "readings")
+        old_full_path = base_dir / old_path
+        new_full_path = old_full_path.parent / new_name
+        
+        if not old_full_path.exists() or not old_full_path.is_dir():
+            return jsonify({"status": "error", "error": "文件夹不存在"}), 404
+        
+        if new_full_path.exists():
+            return jsonify({"status": "error", "error": "新名称已存在"}), 400
+        
+        old_full_path.rename(new_full_path)
+        
+        return jsonify({
+            "status": "success",
+            "new_path": str(new_full_path.relative_to(base_dir))
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/reading/list-folders", methods=["GET"])
+def list_folders():
+    """列出所有文件夹"""
+    try:
+        base_dir = get_user_file_path("", "readings")
+        
+        folders = []
+        for root, dirs, files in os.walk(base_dir):
+            for dir_name in dirs:
+                folder_path = Path(root) / dir_name
+                relative_path = str(folder_path.relative_to(base_dir))
+                folders.append({
+                    "path": relative_path,
+                    "name": dir_name
+                })
+        
+        return jsonify({
+            "status": "success",
+            "folders": folders
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/reading/move-document", methods=["POST"])
+def move_document():
+    """移动文档到指定文件夹"""
+    try:
+        payload = request.get_json(force=True)
+        doc_id = payload.get("doc_id")
+        target_folder = payload.get("target_folder")
+        
+        if not doc_id or not target_folder:
+            return jsonify({"status": "error", "error": "参数不能为空"}), 400
+        
+        # 加载文档索引
+        doc_index_path = get_user_file_path("documents.json", "readings")
+        documents = {}
+        if doc_index_path.exists():
+            with open(doc_index_path, 'r', encoding='utf-8') as f:
+                documents = json.load(f)
+        
+        if doc_id not in documents:
+            return jsonify({"status": "error", "error": "文档不存在"}), 404
+        
+        # 获取文档信息
+        doc_info = documents[doc_id]
+        filename = doc_info.get("filename")
+        
+        # 移动文件
+        base_dir = get_user_file_path("", "readings")
+        old_file_path = base_dir / filename
+        new_file_path = base_dir / target_folder / filename
+        
+        if not old_file_path.exists():
+            return jsonify({"status": "error", "error": "文件不存在"}), 404
+        
+        # 确保目标文件夹存在
+        new_file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 移动文件
+        old_file_path.rename(new_file_path)
+        
+        # 更新文档索引中的路径信息
+        doc_info["folder"] = target_folder
+        
+        with open(doc_index_path, 'w', encoding='utf-8') as f:
+            json.dump(documents, f, ensure_ascii=False, indent=2)
+        
+        return jsonify({
+            "status": "success",
+            "message": "文档移动成功"
         })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
@@ -1762,6 +2542,992 @@ def pdf_viewer():
         return response
     else:
         return jsonify({"status": "error", "message": "pdf-viewer.html not found"}), 404
+
+
+# ============================================================================
+# 词典查询API - 支持词库管理和pymorphy2词法分析
+# ============================================================================
+
+# 初始化pymorphy2分析器（延迟加载）
+_morph_analyzer = None
+
+def get_morph_analyzer():
+    """获取pymorphy2分析器实例"""
+    global _morph_analyzer
+    if _morph_analyzer is None and pymorphy2 is not None:
+        try:
+            _morph_analyzer = pymorphy2.MorphAnalyzer()
+            print("✓ pymorphy2分析器初始化成功")
+        except Exception as e:
+            print(f"✗ pymorphy2分析器初始化失败: {e}")
+            _morph_analyzer = None
+    return _morph_analyzer
+
+
+def normalize_word(word: str) -> List[str]:
+    """使用pymorphy2将词汇还原为原形
+    
+    返回可能的原形列表
+    """
+    morph = get_morph_analyzer()
+    if morph is None:
+        return [word.lower()]
+    
+    try:
+        parses = morph.parse(word)
+        normal_forms = list(set([p.normal_form for p in parses]))
+        return normal_forms if normal_forms else [word.lower()]
+    except Exception as e:
+        print(f"词法分析失败 {word}: {e}")
+        return [word.lower()]
+
+
+def analyze_word_morphology(word: str) -> Dict[str, Any]:
+    """分析词汇的词法信息
+    
+    返回：
+    - normal_form: 原形
+    - pos: 词性
+    - case: 格
+    - gender: 性
+    - number: 数
+    - tense: 时态
+    - person: 人称
+    - voice: 语态
+    - mood: 式
+    - aspect: 体
+    - animacy: 有生命性
+    - transitivity: 及物性
+    - involvement: 参与性
+    """
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {"word": word, "normal_forms": [word.lower()], "analyses": []}
+    
+    try:
+        parses = morph.parse(word)
+        analyses = []
+        
+        for p in parses:
+            analysis = {
+                "normal_form": p.normal_form,
+                "pos": str(p.tag.POS) if p.tag.POS else None,
+                "case": str(p.tag.case) if hasattr(p.tag, 'case') and p.tag.case else None,
+                "gender": str(p.tag.gender) if hasattr(p.tag, 'gender') and p.tag.gender else None,
+                "number": str(p.tag.number) if hasattr(p.tag, 'number') and p.tag.number else None,
+                "tense": str(p.tag.tense) if hasattr(p.tag, 'tense') and p.tag.tense else None,
+                "person": str(p.tag.person) if hasattr(p.tag, 'person') and p.tag.person else None,
+                "voice": str(p.tag.voice) if hasattr(p.tag, 'voice') and p.tag.voice else None,
+                "mood": str(p.tag.mood) if hasattr(p.tag, 'mood') and p.tag.mood else None,
+                "aspect": str(p.tag.aspect) if hasattr(p.tag, 'aspect') and p.tag.aspect else None,
+                "animacy": str(p.tag.animacy) if hasattr(p.tag, 'animacy') and p.tag.animacy else None,
+                "transitivity": str(p.tag.transitivity) if hasattr(p.tag, 'transitivity') and p.tag.transitivity else None,
+                "involvement": str(p.tag.involvement) if hasattr(p.tag, 'involvement') and p.tag.involvement else None,
+                "score": float(p.score),
+                "tag": str(p.tag)
+            }
+            analyses.append(analysis)
+        
+        return {
+            "word": word,
+            "normal_forms": list(set([p.normal_form for p in parses])),
+            "analyses": analyses
+        }
+    except Exception as e:
+        print(f"词法分析失败 {word}: {e}")
+        return {"word": word, "normal_forms": [word.lower()], "analyses": [], "error": str(e)}
+
+
+def generate_word_inflections(word: str) -> Dict[str, Any]:
+    """生成词汇的变格形式
+    
+    返回：
+    - word: 原始词汇
+    - normal_form: 原形
+    - inflections: 变格形式列表，按词性分组
+    """
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {"word": word, "normal_form": word.lower(), "inflections": {}}
+    
+    try:
+        parses = morph.parse(word)
+        if not parses:
+            return {"word": word, "normal_form": word.lower(), "inflections": {}}
+        
+        # 按词性分组解析结果
+        pos_groups = {}
+        for p in parses:
+            pos = p.tag.POS
+            if pos:
+                pos_str = str(pos)
+                if pos_str not in pos_groups:
+                    pos_groups[pos_str] = []
+                pos_groups[pos_str].append(p)
+        
+        # 为每个词性生成变格形式
+        inflections = {}
+        
+        for pos_str, pos_parses in pos_groups.items():
+            best_parse = pos_parses[0]
+            normal_form = best_parse.normal_form
+            
+            if pos_str == 'INFN':
+                # 尝试获取第一人称单数形式
+                verb_parse = best_parse
+                try:
+                    verb_form = best_parse.inflect({'1per', 'sing'})
+                    if verb_form:
+                        # 重新解析动词形式
+                        verb_parses = morph.parse(verb_form.word)
+                        if verb_parses:
+                            verb_parse = verb_parses[0]
+                            pos = verb_parse.tag.POS
+                            pos_str = str(pos) if pos else None
+                except:
+                    pass
+                
+                # 如果还是 INFN，使用通用方法
+                if pos_str == 'INFN':
+                    pos_inflections = generate_generic_inflections(best_parse)
+                else:
+                    pos_inflections = generate_verb_inflections(verb_parse)
+            elif pos_str == 'NOUN':
+                pos_inflections = generate_noun_inflections(best_parse)
+            elif pos_str == 'VERB':
+                pos_inflections = generate_verb_inflections(best_parse)
+            elif pos_str == 'ADJF':
+                pos_inflections = generate_adjective_inflections(best_parse)
+            elif pos_str == 'ADJS':
+                pos_inflections = generate_adjective_inflections(best_parse)
+            elif pos_str == 'NUMR':
+                pos_inflections = generate_numeral_inflections(best_parse)
+            elif pos_str == 'NPRO':
+                pos_inflections = generate_pronoun_inflections(best_parse)
+            else:
+                pos_inflections = generate_generic_inflections(best_parse)
+            
+            inflections[pos_str] = {
+                "normal_form": normal_form,
+                "inflections": pos_inflections
+            }
+        
+        return {
+            "word": word,
+            "normal_form": parses[0].normal_form,
+            "inflections": inflections
+        }
+    except Exception as e:
+        print(f"变格形式生成失败 {word}: {e}")
+        return {"word": word, "normal_form": word.lower(), "inflections": {}, "error": str(e)}
+
+
+def generate_noun_inflections(parse) -> Dict[str, Any]:
+    """生成名词的变格形式"""
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {}
+    
+    cases = ['nomn', 'gent', 'datv', 'accs', 'ablt', 'loct']
+    case_names = {
+        'nomn': '主格',
+        'gent': '属格',
+        'datv': '与格',
+        'accs': '宾格',
+        'ablt': '工具格',
+        'loct': '前置格'
+    }
+    
+    numbers = ['sing', 'plur']
+    number_names = {
+        'sing': '单数',
+        'plur': '复数'
+    }
+    
+    inflections = {}
+    
+    for num in numbers:
+        num_key = number_names.get(num, num)
+        inflections[num_key] = {}
+        
+        for case in cases:
+            try:
+                if num == 'sing':
+                    inflected = parse.inflect({case})
+                else:
+                    inflected = parse.inflect({case, num})
+                
+                if inflected:
+                    case_key = case_names.get(case, case)
+                    inflections[num_key][case_key] = inflected.word
+            except:
+                pass
+    
+    return inflections
+
+
+def generate_verb_inflections(parse) -> Dict[str, Any]:
+    """生成动词的变格形式"""
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {}
+    
+    inflections = {}
+    
+    # 不定式
+    infinitive = parse.normal_form
+    
+    # 主动语态
+    active_voice = {}
+    
+    # 现在/将来时
+    present_future = {}
+    tenses = ['pres', 'futr']
+    persons = ['1per', '2per', '3per']
+    person_names = {
+        '1per': '一',
+        '2per': '二',
+        '3per': '三'
+    }
+    numbers = ['sing', 'plur']
+    number_names = {
+        'sing': '单数',
+        'plur': '复数'
+    }
+    
+    for tense in tenses:
+        tense_key = '现在时' if tense == 'pres' else '将来时'
+        present_future[tense_key] = {}
+        
+        for num in numbers:
+            num_key = number_names.get(num, num)
+            present_future[tense_key][num_key] = {}
+            
+            for person in persons:
+                try:
+                    inflected = parse.inflect({tense, person, num})
+                    if inflected:
+                        person_key = person_names.get(person, person)
+                        present_future[tense_key][num_key][person_key] = inflected.word
+                except:
+                    pass
+    
+    active_voice['现在/将来时'] = present_future
+    
+    # 过去时
+    past_tense = {}
+    genders = ['masc', 'femn', 'neut']
+    gender_names = {
+        'masc': '阳性',
+        'femn': '阴性',
+        'neut': '中性'
+    }
+    
+    for gender in genders:
+        gender_key = gender_names.get(gender, gender)
+        try:
+            inflected = parse.inflect({'past', gender})
+            if inflected:
+                past_tense[gender_key] = inflected.word
+        except:
+            pass
+    
+    # 复数过去时
+    try:
+        inflected = parse.inflect({'past', 'plur'})
+        if inflected:
+            past_tense['复数'] = inflected.word
+    except:
+        pass
+    
+    active_voice['过去时'] = past_tense
+    
+    # 副动词
+    adverbial_participle = []
+    try:
+        inflected = parse.inflect({'GRND', 'past'})
+        if inflected:
+            adverbial_participle.append(inflected.word)
+    except:
+        pass
+    
+    try:
+        inflected = parse.inflect({'GRND', 'pres'})
+        if inflected:
+            adverbial_participle.append(inflected.word)
+    except:
+        pass
+    
+    if adverbial_participle:
+        active_voice['副动词'] = ' // '.join(adverbial_participle)
+    
+    # 命令式
+    imperative = {}
+    for num in numbers:
+        num_key = number_names.get(num, num)
+        try:
+            inflected = parse.inflect({'impr', num})
+            if inflected:
+                imperative[num_key] = inflected.word
+        except:
+            pass
+    
+    active_voice['命令式'] = imperative
+    
+    # 过去时主动形动词
+    past_active_participle = {}
+    cases = ['nomn', 'gent', 'datv', 'accs', 'ablt', 'loct']
+    case_names = {
+        'nomn': '一格',
+        'gent': '二格',
+        'datv': '三格',
+        'accs': '四格',
+        'ablt': '五格',
+        'loct': '六格'
+    }
+    
+    for case in cases:
+        case_key = case_names.get(case, case)
+        past_active_participle[case_key] = {}
+        
+        for gender in genders:
+            gender_key = gender_names.get(gender, gender)
+            try:
+                inflected = parse.inflect({'PRTF', 'past', 'actv', case, gender})
+                if inflected:
+                    past_active_participle[case_key][gender_key] = inflected.word
+            except:
+                pass
+        
+        # 复数
+        try:
+            inflected = parse.inflect({'PRTF', 'past', 'actv', case, 'plur'})
+            if inflected:
+                past_active_participle[case_key]['复数'] = inflected.word
+        except:
+            pass
+    
+    active_voice['过去时主动形动词'] = past_active_participle
+    
+    inflections['主动语态'] = active_voice
+    
+    # 被动语态
+    passive_voice = {}
+    
+    # 过去时被动形动词
+    past_passive_participle = {}
+    
+    for case in cases:
+        case_key = case_names.get(case, case)
+        past_passive_participle[case_key] = {}
+        
+        for gender in genders:
+            gender_key = gender_names.get(gender, gender)
+            try:
+                inflected = parse.inflect({'PRTF', 'past', 'pssv', case, gender})
+                if inflected:
+                    past_passive_participle[case_key][gender_key] = inflected.word
+            except:
+                pass
+        
+        # 复数
+        try:
+            inflected = parse.inflect({'PRTF', 'past', 'pssv', case, 'plur'})
+            if inflected:
+                past_passive_participle[case_key]['复数'] = inflected.word
+        except:
+            pass
+    
+    passive_voice['过去时被动形动词'] = past_passive_participle
+    
+    # 简略形式
+    short_form = {}
+    for gender in genders:
+        gender_key = gender_names.get(gender, gender)
+        try:
+            inflected = parse.inflect({'PRTF', 'past', 'pssv', 'shrt', gender})
+            if inflected:
+                short_form[gender_key] = inflected.word
+        except:
+            pass
+    
+    # 复数简略形式
+    try:
+        inflected = parse.inflect({'PRTF', 'past', 'pssv', 'shrt', 'plur'})
+        if inflected:
+            short_form['复数'] = inflected.word
+    except:
+        pass
+    
+    if short_form:
+        passive_voice['简略形式'] = short_form
+    
+    if passive_voice:
+        inflections['被动语态'] = passive_voice
+    
+    # 添加不定式
+    inflections['不定式'] = infinitive
+    
+    return inflections
+
+
+def generate_adjective_inflections(parse) -> Dict[str, Any]:
+    """生成形容词的变格形式"""
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {}
+    
+    cases = ['nomn', 'gent', 'datv', 'accs', 'ablt', 'loct']
+    case_names = {
+        'nomn': '主格',
+        'gent': '属格',
+        'datv': '与格',
+        'accs': '宾格',
+        'ablt': '工具格',
+        'loct': '前置格'
+    }
+    
+    genders = ['masc', 'femn', 'neut']
+    gender_names = {
+        'masc': '阳性',
+        'femn': '阴性',
+        'neut': '中性'
+    }
+    
+    numbers = ['sing', 'plur']
+    number_names = {
+        'sing': '单数',
+        'plur': '复数'
+    }
+    
+    inflections = {}
+    
+    for num in numbers:
+        num_key = number_names.get(num, num)
+        inflections[num_key] = {}
+        
+        if num == 'sing':
+            for gender in genders:
+                gender_key = gender_names.get(gender, gender)
+                inflections[num_key][gender_key] = {}
+                
+                for case in cases:
+                    try:
+                        inflected = parse.inflect({case, gender, num})
+                        if inflected:
+                            case_key = case_names.get(case, case)
+                            inflections[num_key][gender_key][case_key] = inflected.word
+                    except:
+                        pass
+        else:
+            for case in cases:
+                try:
+                    inflected = parse.inflect({case, num})
+                    if inflected:
+                        case_key = case_names.get(case, case)
+                        inflections[num_key][case_key] = inflected.word
+                except:
+                        pass
+    
+    # 短尾形式
+    short_forms = {}
+    for gender in genders:
+        gender_key = gender_names.get(gender, gender)
+        try:
+            inflected = parse.inflect({'ADJS', gender, 'sing'})
+            if inflected:
+                short_forms[gender_key] = inflected.word
+        except:
+            pass
+    
+    try:
+        inflected = parse.inflect({'ADJS', 'plur'})
+        if inflected:
+            short_forms['复数'] = inflected.word
+    except:
+        pass
+    
+    if short_forms:
+        inflections['短尾形式'] = short_forms
+    
+    # 比较级
+    comparative_forms = []
+    
+    # 尝试从原始词获取比较级
+    try:
+        # 解析原始词
+        base_word = parse.normal_form
+        parses = morph.parse(base_word)
+        
+        # 查找包含比较级标签的解析
+        for p in parses:
+            tag_str = str(p.tag)
+            if 'COMP' in tag_str or 'compar' in tag_str.lower():
+                comparative_forms.append(p.word)
+                break
+    except:
+        pass
+    
+    # 如果还是没有结果，尝试直接使用inflect
+    if not comparative_forms:
+        try:
+            inflected = parse.inflect({'COMP'})
+            if inflected:
+                comparative_forms.append(inflected.word)
+        except:
+            pass
+    
+    if comparative_forms:
+        inflections['比较级'] = ' // '.join(comparative_forms)
+    
+    return inflections
+
+
+def generate_numeral_inflections(parse) -> Dict[str, Any]:
+    """生成数词的变格形式"""
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {}
+    
+    cases = ['nomn', 'gent', 'datv', 'accs', 'ablt', 'loct']
+    case_names = {
+        'nomn': '主格',
+        'gent': '属格',
+        'datv': '与格',
+        'accs': '宾格',
+        'ablt': '工具格',
+        'loct': '前置格'
+    }
+    
+    numbers = ['sing', 'plur']
+    number_names = {
+        'sing': '单数',
+        'plur': '复数'
+    }
+    
+    inflections = {}
+    
+    for num in numbers:
+        num_key = number_names.get(num, num)
+        inflections[num_key] = {}
+        
+        for case in cases:
+            try:
+                inflected = parse.inflect({case, num})
+                if inflected:
+                    case_key = case_names.get(case, case)
+                    inflections[num_key][case_key] = inflected.word
+            except:
+                pass
+    
+    return inflections
+
+
+def generate_pronoun_inflections(parse) -> Dict[str, Any]:
+    """生成代词的变格形式"""
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {}
+    
+    cases = ['nomn', 'gent', 'datv', 'accs', 'ablt', 'loct']
+    case_names = {
+        'nomn': '主格',
+        'gent': '属格',
+        'datv': '与格',
+        'accs': '宾格',
+        'ablt': '工具格',
+        'loct': '前置格'
+    }
+    
+    numbers = ['sing', 'plur']
+    number_names = {
+        'sing': '单数',
+        'plur': '复数'
+    }
+    
+    inflections = {}
+    
+    for num in numbers:
+        num_key = number_names.get(num, num)
+        inflections[num_key] = {}
+        
+        for case in cases:
+            try:
+                inflected = parse.inflect({case, num})
+                if inflected:
+                    case_key = case_names.get(case, case)
+                    inflections[num_key][case_key] = inflected.word
+            except:
+                pass
+    
+    return inflections
+
+
+def generate_generic_inflections(parse) -> Dict[str, Any]:
+    """生成通用词汇的变格形式"""
+    morph = get_morph_analyzer()
+    if morph is None:
+        return {}
+    
+    inflections = {}
+    
+    try:
+        if parse.tag.case:
+            cases = ['nomn', 'gent', 'datv', 'accs', 'ablt', 'loct']
+            case_names = {
+                'nomn': '主格',
+                'gent': '属格',
+                'datv': '与格',
+                'accs': '宾格',
+                'ablt': '工具格',
+                'loct': '前置格'
+            }
+            
+            for case in cases:
+                try:
+                    inflected = parse.inflect({case})
+                    if inflected:
+                        case_key = case_names.get(case, case)
+                        inflections[case_key] = inflected.word
+                except:
+                    pass
+    except:
+        pass
+    
+    return inflections
+
+
+def load_dictionary_files() -> List[Dict[str, Any]]:
+    """加载所有词库文件"""
+    # 加载项目内置词典（data/dictionary）
+    builtin_dict_dir = Path(__file__).parent.parent / "data" / "dictionary"
+    builtin_dict_dir.mkdir(exist_ok=True, parents=True)
+    
+    # 加载用户词典（user_data/dictionary）
+    user_dict_dir = get_user_file_path("", "dictionary")
+    user_dict_dir.mkdir(exist_ok=True)
+    
+    dictionaries = []
+    
+    # 先加载内置词典
+    for file_path in builtin_dict_dir.glob("*"):
+        if file_path.is_file() and file_path.suffix.lower() in ['.json', '.csv', '.tsv', '.txt']:
+            try:
+                dict_data = {
+                    "filename": file_path.name,
+                    "path": str(file_path),
+                    "size": file_path.stat().st_size,
+                    "entries": [],
+                    "type": "builtin"  # 标记为内置词典
+                }
+                
+                # 根据文件类型加载
+                if file_path.suffix.lower() == '.json':
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        dict_data["entries"] = json.load(f)
+                elif file_path.suffix.lower() in ['.csv', '.tsv']:
+                    import csv
+                    delimiter = '\t' if file_path.suffix.lower() == '.tsv' else ','
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f, delimiter=delimiter)
+                        dict_data["entries"] = list(reader)
+                
+                dictionaries.append(dict_data)
+            except Exception as e:
+                print(f"加载内置词库失败 {file_path.name}: {e}")
+    
+    # 再加载用户词典
+    for file_path in user_dict_dir.glob("*"):
+        if file_path.is_file() and file_path.suffix.lower() in ['.json', '.csv', '.tsv', '.txt']:
+            try:
+                dict_data = {
+                    "filename": file_path.name,
+                    "path": str(file_path),
+                    "size": file_path.stat().st_size,
+                    "entries": [],
+                    "type": "user"  # 标记为用户词典
+                }
+                
+                # 根据文件类型加载
+                if file_path.suffix.lower() == '.json':
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        dict_data["entries"] = json.load(f)
+                elif file_path.suffix.lower() in ['.csv', '.tsv']:
+                    import csv
+                    delimiter = '\t' if file_path.suffix.lower() == '.tsv' else ','
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f, delimiter=delimiter)
+                        dict_data["entries"] = list(reader)
+                
+                dictionaries.append(dict_data)
+            except Exception as e:
+                print(f"加载用户词库失败 {file_path.name}: {e}")
+    
+    return dictionaries
+
+
+def search_in_dictionaries(word: str) -> List[Dict[str, Any]]:
+    """在所有词库中搜索词汇"""
+    # 获取词汇的原形
+    normal_forms = normalize_word(word)
+    
+    # 加载所有词库
+    dictionaries = load_dictionary_files()
+    
+    results = []
+    
+    for dict_data in dictionaries:
+        for entry in dict_data["entries"]:
+            # 检查entry是否匹配（原形或变形）
+            entry_word = entry.get("word", "").lower()
+            
+            if entry_word == word.lower() or entry_word in normal_forms:
+                result = {
+                    "source": dict_data["filename"],
+                    "word": entry.get("word", ""),
+                    "translation": entry.get("translation", ""),
+                    "pos": entry.get("pos", ""),
+                    "examples": entry.get("examples", []),
+                    "notes": entry.get("notes", "")
+                }
+                results.append(result)
+    
+    return results
+
+
+@app.route("/api/dictionary/lookup", methods=["POST"])
+def dictionary_lookup():
+    """查词API
+    
+    请求体:
+    {
+        "word": "привет",
+        "analyze": true  # 是否进行词法分析
+    }
+    
+    返回:
+    {
+        "status": "success",
+        "word": "привет",
+        "morphology": {...},  # 词法分析结果
+        "dictionary": [...],  # 词典查询结果
+        "vocab": {...}        # 生词本中的记录
+    }
+    """
+    try:
+        data = request.get_json()
+        word = data.get("word", "").strip()
+        analyze = data.get("analyze", True)
+        
+        if not word:
+            return jsonify({"status": "error", "error": "词汇不能为空"}), 400
+        
+        result = {
+            "status": "success",
+            "word": word,
+            "morphology": None,
+            "dictionary": [],
+            "vocab": None
+        }
+        
+        # 词法分析
+        if analyze and pymorphy2 is not None:
+            result["morphology"] = analyze_word_morphology(word)
+            # 生成变格形式
+            result["inflections"] = generate_word_inflections(word)
+        
+        # 词典查询
+        result["dictionary"] = search_in_dictionaries(word)
+        
+        # 查询生词本（从所有生词本中查找）
+        vocabbooks_path = get_user_file_path("vocabbooks.json", "vocab")
+        if vocabbooks_path.exists():
+            with open(vocabbooks_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                vocabBooks = data.get("vocabBooks", [])
+                
+                for book in vocabBooks:
+                    for vocab_word in book.get("words", []):
+                        if vocab_word.get("word", "").lower() == word.lower():
+                            result["vocab"] = vocab_word
+                            break
+                    if result["vocab"]:
+                        break
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/dictionary/upload", methods=["POST"])
+def upload_dictionary():
+    """上传词库文件
+    
+    支持JSON, CSV, TSV格式
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({"status": "error", "error": "没有上传文件"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"status": "error", "error": "文件名为空"}), 400
+        
+        # 检查文件格式
+        file_ext = Path(file.filename).suffix.lower()
+        if file_ext not in ['.json', '.csv', '.tsv', '.txt']:
+            return jsonify({"status": "error", "error": "不支持的文件格式"}), 400
+        
+        # 保存到dictionary文件夹
+        dict_dir = get_user_file_path("", "dictionary")
+        dict_dir.mkdir(exist_ok=True)
+        
+        file_path = dict_dir / file.filename
+        file.save(str(file_path))
+        
+        # 验证文件内容
+        entry_count = 0
+        try:
+            if file_ext == '.json':
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    entries = json.load(f)
+                    entry_count = len(entries) if isinstance(entries, list) else 0
+            elif file_ext in ['.csv', '.tsv']:
+                import csv
+                delimiter = '\t' if file_ext == '.tsv' else ','
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f, delimiter=delimiter)
+                    entry_count = sum(1 for _ in reader)
+        except Exception as e:
+            file_path.unlink()  # 删除无效文件
+            return jsonify({"status": "error", "error": f"文件格式错误: {str(e)}"}), 400
+        
+        return jsonify({
+            "status": "success",
+            "filename": file.filename,
+            "entries": entry_count,
+            "message": f"成功导入 {entry_count} 个词条"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/dictionary/list", methods=["GET"])
+def list_dictionaries():
+    """列出所有已导入的词库"""
+    try:
+        # 列出内置词典
+        builtin_dict_dir = Path(__file__).parent.parent / "data" / "dictionary"
+        builtin_dict_dir.mkdir(exist_ok=True, parents=True)
+        
+        # 列出用户词典
+        user_dict_dir = get_user_file_path("", "dictionary")
+        user_dict_dir.mkdir(exist_ok=True)
+        
+        dictionaries = []
+        
+        # 添加内置词典
+        for file_path in builtin_dict_dir.glob("*"):
+            if file_path.is_file() and file_path.suffix.lower() in ['.json', '.csv', '.tsv', '.txt']:
+                entry_count = 0
+                try:
+                    if file_path.suffix.lower() == '.json':
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            entries = json.load(f)
+                            entry_count = len(entries) if isinstance(entries, list) else 0
+                    elif file_path.suffix.lower() in ['.csv', '.tsv']:
+                        import csv
+                        delimiter = '\t' if file_path.suffix.lower() == '.tsv' else ','
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            reader = csv.DictReader(f, delimiter=delimiter)
+                            entry_count = sum(1 for _ in reader)
+                except:
+                    entry_count = 0
+                
+                dictionaries.append({
+                    "filename": file_path.name,
+                    "size": file_path.stat().st_size,
+                    "entries": entry_count,
+                    "upload_time": file_path.stat().st_mtime,
+                    "type": "builtin",
+                    "editable": False  # 内置词典不可编辑
+                })
+        
+        # 添加用户词典
+        for file_path in user_dict_dir.glob("*"):
+            if file_path.is_file() and file_path.suffix.lower() in ['.json', '.csv', '.tsv', '.txt']:
+                entry_count = 0
+                try:
+                    if file_path.suffix.lower() == '.json':
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            entries = json.load(f)
+                            entry_count = len(entries) if isinstance(entries, list) else 0
+                    elif file_path.suffix.lower() in ['.csv', '.tsv']:
+                        import csv
+                        delimiter = '\t' if file_path.suffix.lower() == '.tsv' else ','
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            reader = csv.DictReader(f, delimiter=delimiter)
+                            entry_count = sum(1 for _ in reader)
+                except:
+                    entry_count = 0
+                
+                dictionaries.append({
+                    "filename": file_path.name,
+                    "size": file_path.stat().st_size,
+                    "entries": entry_count,
+                    "upload_time": file_path.stat().st_mtime,
+                    "type": "user",
+                    "editable": True  # 用户词典可编辑
+                })
+        
+        return jsonify({
+            "status": "success",
+            "dictionaries": dictionaries,
+            "count": len(dictionaries)
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/dictionary/delete/<filename>", methods=["DELETE"])
+def delete_dictionary(filename):
+    """删除词库文件"""
+    try:
+        # 只允许删除用户词典，不允许删除内置词典
+        dict_dir = get_user_file_path("", "dictionary")
+        file_path = dict_dir / filename
+        
+        if not file_path.exists():
+            # 检查是否是内置词典
+            builtin_dict_dir = Path(__file__).parent.parent / "data" / "dictionary"
+            builtin_file_path = builtin_dict_dir / filename
+            if builtin_file_path.exists():
+                return jsonify({"status": "error", "error": "内置词典不可删除"}), 403
+            return jsonify({"status": "error", "error": "词库不存在"}), 404
+        
+        file_path.unlink()
+        
+        return jsonify({
+            "status": "success",
+            "message": f"已删除词库: {filename}"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/dictionary/analyze/<word>", methods=["GET"])
+def analyze_word(word):
+    """分析单个词汇的词法信息"""
+    try:
+        if not word:
+            return jsonify({"status": "error", "error": "词汇不能为空"}), 400
+        
+        result = analyze_word_morphology(word)
+        result["status"] = "success"
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 if __name__ == "__main__":
