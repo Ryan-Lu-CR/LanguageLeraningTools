@@ -12,7 +12,7 @@
 
 * { box-sizing: border-box; }
 
-/* 全局滚动条样式 - 与 #reading-text-body 一致 */
+/* 全局滚动条样�?- �?#reading-text-body 一�?*/
 ::-webkit-scrollbar {
   width: 8px;
 }
@@ -87,7 +87,7 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; flex: 1; }
 .app-layout {
   padding: 16px 24px;
   overflow-x: hidden; /* 防止布局溢出 */
-  height: calc(100vh - 80px); /* 减去header的高度 */
+  height: calc(100vh - 80px); /* 减去header的高�?*/
   display: flex;
   flex-direction: column;
 }
@@ -117,12 +117,12 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; flex: 1; }
   height: 100%;
 }
 
-/* 左侧栏收起状态 */
+/* 左侧栏收起状�?*/
 .left-sidebar.collapsed {
   width: 60px;
 }
 
-/* 左侧栏内容 */
+/* 左侧栏内�?*/
 .left-sidebar .sidebar-content {
   width: 60px;
   background: rgba(11, 18, 33, 0.8);
@@ -134,14 +134,14 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; flex: 1; }
   border-right: 1px solid var(--border);
 }
 
-/* 左侧栏面板 */
+/* 左侧栏面�?*/
 .left-sidebar .sidebar-panel {
   flex: 1;
   padding: 16px;
   overflow-y: auto;
 }
 
-/* 左侧栏切换按钮 */
+/* 左侧栏切换按�?*/
 
 .left-sidebar.collapsed .sidebar-toggle {
   transform: rotate(180deg);
@@ -174,7 +174,7 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; flex: 1; }
   height: 100%;
 }
 
-/* 侧栏收起状态 */
+/* 侧栏收起状�?*/
 .right-sidebar.collapsed {
   width: 60px;
 }
@@ -241,7 +241,7 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; flex: 1; }
   border-right: 1px solid var(--border);
 }
 
-/* 侧栏功能项 */
+/* 侧栏功能�?*/
 .sidebar-items {
   display: flex;
   flex-direction: column;
@@ -287,7 +287,7 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; flex: 1; }
   transition: opacity 0.3s ease;
 }
 
-/* 侧栏收起时隐藏标签 */
+/* 侧栏收起时隐藏标�?*/
 .right-sidebar.collapsed .sidebar-label,
 .left-sidebar.collapsed .sidebar-label {
   opacity: 0;
@@ -305,7 +305,7 @@ header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; flex: 1; }
   flex-direction: column;
 }
 
-/* 侧栏收起时隐藏面板 */
+/* 侧栏收起时隐藏面�?*/
 .right-sidebar.collapsed .sidebar-panel {
   display: none;
 }
@@ -424,7 +424,7 @@ section {
 }
 
 
-/* 波形图头部 */
+/* 波形图头�?*/
 .waveform-header {
   display: flex;
   justify-content: space-between;
@@ -490,7 +490,7 @@ section {
   color: var(--muted);
 }
 
-/* 播放器波形图进度条 */
+/* 播放器波形图进度�?*/
 .player-waveform {
   width: 100%;
   max-width: 100%;
@@ -503,11 +503,12 @@ section {
   display: block;
 }
 
-/* 视频模式下将视频与波形并排显示：左 1/3，右 2/3 */
+/* 视频模式下将视频与波形并排显示：�?1/3，右 2/3 */
+/* 视频模式下将视频与波形并排显示：�?1/3，右 2/3 */
 #playback-body.video-split {
   display: grid;
-  grid-template-columns: 1fr 2fr; /* 左视频 1/3，右波形 2/3 */
-  grid-template-rows: auto 1fr;   /* 右侧顶部为波形控制区，下面为波形图 */
+  grid-template-columns: 1fr 2fr; /* 左视�?1/3，右波形 2/3 */
+  grid-template-rows: auto 1fr;   /* 右侧顶部为波形控制区，下面为波形�?*/
   grid-template-areas:
     "video header"
     "video waveform";
@@ -515,14 +516,14 @@ section {
   align-items: stretch;
 }
 
-/* 并排布局下，波形图填满容器高度 */
+/* 并排布局下，波形图填满容器高�?*/
 #playback-body.video-split .player-waveform {
   height: 100%;
   min-height: 120px; /* 允许半高效果；具体高度由 JS 同步 */
   grid-area: waveform;
 }
 
-/* 尝试让内部画布随容器高度缩放（视觉匹配播放器高度） */
+/* 尝试让内部画布随容器高度缩放（视觉匹配播放器高度�?*/
 #playback-body.video-split .player-waveform canvas {
   height: 100% !important;
 }
@@ -531,7 +532,95 @@ section {
 #playback-body.video-split #player { grid-area: video; }
 #playback-body.video-split .waveform-header { grid-area: header; }
 
-/* WaveSurfer 内部 wrapper 样式 - 隐藏滚动条 */
+/* 新增：视�?字幕模式 */
+.main-panel.video-subtitle-mode {
+  display: grid;
+  grid-template-columns: minmax(520px, 3fr) minmax(320px, 2fr);
+  grid-template-rows: auto auto auto auto;
+  grid-template-areas:
+    "header header"
+    "video subtitle"
+    "wave-header wave-header"
+    "waveform waveform";
+  gap: 12px;
+  align-items: stretch;
+}
+
+.main-panel.video-subtitle-mode > .playback-section {
+  display: contents;
+}
+
+.main-panel.video-subtitle-mode .playback-section .section-header {
+  grid-area: header;
+}
+
+.main-panel.video-subtitle-mode > .subtitle-section {
+  grid-area: subtitle;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  align-self: stretch;
+}
+
+.main-panel.video-subtitle-mode .subtitle-section .section-header {
+  flex-shrink: 0;
+}
+
+.main-panel.video-subtitle-mode .subtitle-section #subtitle-list-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+.main-panel.video-subtitle-mode #playback-body:not(.collapsed) {
+  display: contents;
+}
+
+.main-panel.video-subtitle-mode #playback-body.collapsed {
+  display: none !important;
+}
+
+.main-panel.video-subtitle-mode #player {
+  grid-area: video;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  max-height: 100%;
+  min-height: 360px;
+  object-fit: contain;
+}
+
+.main-panel.video-subtitle-mode .waveform-header {
+  grid-area: wave-header;
+}
+
+.main-panel.video-subtitle-mode .player-waveform {
+  grid-area: waveform;
+  height: 120px;
+  min-height: 120px;
+}
+
+.subtitle-section.in-video-mode .section-header {
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.subtitle-section.in-video-mode #subtitle-list-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.subtitle-section.in-video-mode #subtitle-list {
+  height: 100%;
+}
+
+
+/* WaveSurfer 内部 wrapper 样式 - 隐藏滚动�?*/
 .player-waveform > div,
 .waveform-container > div,
 .waveform-canvas > div {
@@ -540,7 +629,7 @@ section {
   display: block !important;
 }
 
-/* 使用默认滚动条 */
+/* 使用默认滚动�?*/
 
 .section-header {
   display: flex;
@@ -798,7 +887,7 @@ button.mini-btn { padding: 4px 8px; font-size: 11px; background: transparent; bo
 button.mini-btn:hover { background: rgba(56, 189, 248, 0.08); border-color: var(--accent); color: var(--accent); }
 button.full-width { width: 100%; }
 
-/* 按钮活跃状态 */
+/* 按钮活跃状�?*/
 button.active {
   background: linear-gradient(135deg, rgba(52, 211, 153, 0.3), rgba(56, 189, 248, 0.3));
   border-color: var(--accent);
@@ -868,7 +957,7 @@ button.active:hover {
   border-color: #3b82f6;
 }
 
-/* 播放按钮在 active 状态时的样式 */
+/* 播放按钮�?active 状态时的样�?*/
 .subtitle-row.active .play-btn {
   background: rgba(34, 211, 153, 0.3);
   border-color: rgba(34, 211, 153, 0.6);
@@ -879,6 +968,47 @@ button.active:hover {
   background: rgba(34, 211, 153, 0.5);
   border-color: rgba(34, 211, 153, 0.8);
   color: #a7f3d0;
+}
+
+/* 添加到句法分析按�?*/
+.subtitle-row .add-to-syntax-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: rgba(168, 85, 247, 0.2);
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  border-radius: 4px;
+  color: #a855f7;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.subtitle-row .add-to-syntax-btn:hover {
+  background: rgba(168, 85, 247, 0.4);
+  border-color: rgba(168, 85, 247, 0.7);
+  color: #e9d5ff;
+  transform: scale(1.1);
+}
+
+.subtitle-row .add-to-syntax-btn:active {
+  background: rgba(168, 85, 247, 0.6);
+  border-color: #9333ea;
+  transform: scale(0.95);
+}
+
+.subtitle-row.active .add-to-syntax-btn {
+  background: rgba(168, 85, 247, 0.3);
+  border-color: rgba(168, 85, 247, 0.6);
+}
+
+.subtitle-row.active .add-to-syntax-btn:hover {
+  background: rgba(168, 85, 247, 0.5);
+  border-color: rgba(168, 85, 247, 0.8);
 }
 
 .subtitle-row .time { 
@@ -897,7 +1027,7 @@ button.active:hover {
 .subtitle-row .text { font-size: 15px; margin: 3px 0; user-select: text; }
 .subtitle-row .note { color: var(--success); font-size: 11px; }
 
-/* 划词气泡框 */
+/* 划词气泡�?*/
 .vocab-bubble {
   position: fixed;
   background: rgba(11, 18, 33, 0.98);
@@ -1099,7 +1229,7 @@ button.active:hover {
   transform: scale(0.97);
 }
 
-/* 生词本词汇高亮样式 */
+/* 生词本词汇高亮样�?*/
 .vocab-highlight {
   text-decoration: underline;
   text-decoration-style: wavy;
@@ -1590,7 +1720,7 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
 /* Playlist styles */
 
 
-/* 生词本选择器样式（复用播放列表样式） */
+/* 生词本选择器样式（复用播放列表样式�?*/
 .vocabbook-selector-wrapper {
   display: flex;
   gap: 8px;
@@ -1695,26 +1825,26 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
   -ms-user-select: none;
 }
 
-/* 拖拽插入位置指示器 - 上方插入 */
+/* 拖拽插入位置指示�?- 上方插入 */
 .tree-node-content.drag-over-before {
   border-top: 3px solid var(--accent);
   background: rgba(56, 189, 248, 0.1);
 }
 
-/* 拖拽插入位置指示器 - 下方插入 */
+/* 拖拽插入位置指示�?- 下方插入 */
 .tree-node-content.drag-over-after {
   border-bottom: 3px solid var(--accent);
   background: rgba(56, 189, 248, 0.1);
 }
 
-/* 拖拽到文件夹上 */
+/* 拖拽到文件夹�?*/
 .tree-node-content.drag-over-folder {
   background: rgba(34, 211, 153, 0.2);
   border: 2px solid var(--success);
   border-radius: 6px;
 }
 
-/* 拖拽指示器样式 */
+/* 拖拽指示器样�?*/
 .tree-node-content.drag-over-before::before,
 .tree-node-content.drag-over-after::after {
   content: '';
@@ -2195,6 +2325,36 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
   width: 95%;
 }
 
+/* 词典详情模态框全屏 */
+.modal-fullscreen {
+  max-width: 95vw;
+  width: 95vw;
+  max-height: 95vh;
+  height: 95vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 词典详情模态框的modal-body充分利用空间 */
+#dictionary-modal .modal-body {
+  padding: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 词典详情模态框内容容器 */
+#dictionary-modal-content {
+  flex: 1;
+  border-radius: 0;
+  background: white;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -2226,7 +2386,7 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
   padding: 20px;
 }
 
-/* 手动打轴行列表样式 */
+/* 手动打轴行列表样�?*/
 .line-list { display: block; }
 .line-item { padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: rgba(17, 24, 39, 0.6); }
 .line-item.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.3) inset; }
@@ -2327,7 +2487,7 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
   overflow: hidden;
 }
 
-/* 波形工具栏 - 同行显示所有控件 */
+/* 波形工具�?- 同行显示所有控�?*/
 .waveform-toolbar {
   display: flex;
   align-items: center;
@@ -2338,7 +2498,7 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
   border-radius: 4px;
 }
 
-/* 缩放控制组 */
+/* 缩放控制�?*/
 .zoom-controls {
   display: flex;
   align-items: center;
@@ -2376,7 +2536,7 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
   border-color: #3b82f6;
 }
 
-/* 时间输入框优化 */
+/* 时间输入框优�?*/
 .waveform-toolbar .time-input {
   padding: 6px 8px;
   font-size: 11px;
@@ -2805,7 +2965,7 @@ footer { padding: 16px 24px 32px; color: var(--muted); text-align: center; }
     flex-shrink: 0;
   }
 
-  /* iOS 风格开关 */
+  /* iOS 风格开�?*/
   .toggle-switch {
     position: relaimportant;
     display: inline-block !important;
@@ -2897,13 +3057,13 @@ header .mode-btn.active {
 
 /* 阅读文本区域样式 */
 .reading-text-section {
-  flex: 1; /* 填充 .reading-main-panel 的剩余空间 */
+  flex: 1; /* 填充 .reading-main-panel 的剩余空�?*/
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
-/* 文件上传区 */
+/* 文件上传�?*/
 .file-upload-area {
   padding: 16px;
   border: 2px dashed var(--border);
@@ -2938,10 +3098,10 @@ header .mode-btn.active {
   font-size: 12px;
 }
 
-/* 阅读内容区 */
-/* 阅读内容容器（带滚动） */
+/* 阅读内容�?*/
+/* 阅读内容容器（带滚动�?*/
 #reading-text-body {
-  height: calc(100vh - 180px);  /* 固定高度，确保PDF阅读器完整显示 */
+  height: calc(100vh - 180px);  /* 固定高度，确保PDF阅读器完整显�?*/
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
@@ -3036,7 +3196,7 @@ header .mode-btn.active {
   text-align: right;
 }
 
-/* 查词区 */
+/* 查词�?*/
 .lookup-result {
   padding: 12px;
   background: rgba(56, 189, 248, 0.05);
@@ -3061,7 +3221,7 @@ header .mode-btn.active {
   color: var(--muted);
 }
 
-/* 搜索框 */
+/* 搜索�?*/
 .search-box {
   padding: 8px 12px;
   background: rgba(0, 0, 0, 0.3);
@@ -3130,7 +3290,7 @@ header .mode-btn.active {
   border-color: var(--accent);
 }
 
-/* 进度条样式 */
+/* 进度条样�?*/
 .progress-info {
   padding: 12px;
   background: rgba(0, 0, 0, 0.3);
@@ -3192,14 +3352,14 @@ header .mode-btn.active {
   font-weight: 600;
 }
 
-/* 响应式设计 */
+/* 响应式设�?*/
 @media (max-width: 1200px) {
   .reading-content {
     max-height: 300px;
   }
 }
 
-/* 词法分析网格滚动条样式 */
+/* 词法分析网格滚动条样�?*/
 .morphology-grid::-webkit-scrollbar {
   width: 8px;
 }
@@ -3216,4 +3376,126 @@ header .mode-btn.active {
 
 .morphology-grid::-webkit-scrollbar-thumb:hover {
   background: rgba(100, 150, 255, 0.7);
+}
+
+/* 词典折叠功能样式 */
+.dictionary-collapsible {
+  margin-bottom: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.02);
+  transition: all 180ms ease;
+}
+
+.dictionary-collapsible-header {
+  display: flex;
+  align-items: center;
+  padding: 12px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  user-select: none;
+  transition: background 180ms ease;
+}
+
+.dictionary-collapsible-header:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.dictionary-collapsible-header h4 {
+  margin: 0;
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dictionary-collapsible-toggle {
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform 180ms ease;
+  display: inline-block;
+  margin-left: 8px;
+}
+
+.dictionary-collapsible-content {
+  padding: 12px;
+  
+  overflow: hidden;
+  transition: max-height 180ms ease, opacity 180ms ease, padding 180ms ease;
+  opacity: 1;
+}
+
+.dictionary-collapsible.collapsed .dictionary-collapsible-content {
+  max-height: 0;
+  padding: 0 12px;
+  opacity: 0;
+  overflow: hidden;
+}
+
+.dictionary-collapsible.collapsed .dictionary-collapsible-toggle {
+  transform: rotate(-90deg);
+}
+
+/* 千亿词霸iframe嵌入样式 */
+.dictionary-qianyix iframe {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  background: white;
+}
+
+.dictionary-qianyix iframe:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* 千亿词霸预览容器样式 */
+.qianyix-preview-container {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: var(--text) !important;
+}
+
+.qianyix-preview-container h2.keyword {
+  color: var(--primary);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 8px 0 12px 0;
+}
+
+.qianyix-preview-container h2.keyword b {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.qianyix-preview-container p.exp {
+  color: var(--text);
+  line-height: 1.8;
+  margin: 0;
+}
+
+@media (max-width: 768px) {
+  .dictionary-qianyix iframe {
+    height: 400px !important;
+  }
+}
+/* �䷨�����ʹʵ�����������ʽ */
+.syntax-results div[style*="overflow-x: auto"]::-webkit-scrollbar,
+.dictionary-results div[style*="overflow-x: auto"]::-webkit-scrollbar {
+  height: 4px;
+}
+
+.syntax-results div[style*="overflow-x: auto"]::-webkit-scrollbar-track,
+.dictionary-results div[style*="overflow-x: auto"]::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 2px;
+}
+
+.syntax-results div[style*="overflow-x: auto"]::-webkit-scrollbar-thumb,
+.dictionary-results div[style*="overflow-x: auto"]::-webkit-scrollbar-thumb {
+  background: rgba(100, 150, 255, 0.4);
+  border-radius: 2px;
+}
+
+.syntax-results div[style*="overflow-x: auto"]::-webkit-scrollbar-thumb:hover,
+.dictionary-results div[style*="overflow-x: auto"]::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 150, 255, 0.6);
 }

@@ -49,6 +49,10 @@
               <div class="sidebar-icon">📋</div>
               <div class="sidebar-label">播放列表</div>
             </div>
+            <div class="sidebar-item" data-module="syntax-analysis" title="句法分析">
+              <div class="sidebar-icon">🌳</div>
+              <div class="sidebar-label">句法分析</div>
+            </div>
           </div>
         </div>
         <!-- 侧栏内容区域 -->
@@ -68,6 +72,24 @@
               <div id="playlist" class="playlist"></div>
             </div>
           </div>
+
+          <!-- 句法分析模块 -->
+          <div id="syntax-analysis-module" class="sidebar-module">
+            <div class="module-header">
+              <h3>🌳 句法分析</h3>
+              <div class="header-actions">
+                <button id="btn-syntax-expand" class="mini-btn" title="放大展示" style="display: none;">🔍 放大</button>
+                <button id="btn-syntax-clear" class="mini-btn" title="清空结果">🧹 清空</button>
+              </div>
+            </div>
+            <div class="module-body">
+              <div class="syntax-analysis-wrapper">
+                <textarea id="syntax-input" class="search-box" placeholder="输入俄语句子进行句法分析..." style="min-height: 80px; resize: vertical;"></textarea>
+                <button id="btn-syntax-analyze" class="primary" style="width: 100%; margin-top: 10px;">📊 分析</button>
+              </div>
+              <div id="syntax-results" class="syntax-results" style="margin-top: 15px;"></div>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -77,6 +99,9 @@
       <section class="playback-section">
         <div class="section-header">
           <div class="section-title">📽️ 播放器 · <span id="current-media-name">未选择</span></div>
+          <div class="header-actions">
+            <button id="btn-toggle-video-mode" class="mini-btn" title="切换视频显示模式" style="display: none;">🔄 视频模式</button>
+          </div>
           <button class="collapse-btn" data-target="playback-body" aria-label="折叠/展开播放器">▾</button>
         </div>
         <div id="playback-body" class="collapsible-body">
@@ -259,12 +284,6 @@
           <div class="module-body">
             <div class="dictionary-search-wrapper">
               <input type="text" id="dictionary-search-input" class="search-box" placeholder="输入单词或短语进行搜索...">
-              <div class="dictionary-search-controls">
-                <label class="badge" for="dictionary-search-case">区分大小写</label>
-                <input type="checkbox" id="dictionary-search-case" />
-                <label class="badge" for="dictionary-search-regex">正则表达式</label>
-                <input type="checkbox" id="dictionary-search-regex" />
-              </div>
             </div>
             <div id="dictionary-results" class="dictionary-results"></div>
             <div id="dictionary-stats" class="dictionary-stats"></div>
@@ -453,12 +472,6 @@
             <div class="module-body">
               <div class="dictionary-search-wrapper">
                 <input type="text" id="reading-dictionary-search-input" class="search-box" placeholder="输入单词或短语进行搜索...">
-                <div class="dictionary-search-controls">
-                  <label class="badge" for="reading-dictionary-search-case">区分大小写</label>
-                  <input type="checkbox" id="reading-dictionary-search-case" />
-                  <label class="badge" for="reading-dictionary-search-regex">正则表达式</label>
-                  <input type="checkbox" id="reading-dictionary-search-regex" />
-                </div>
               </div>
               <div id="reading-dictionary-results" class="dictionary-results"></div>
               <div id="reading-dictionary-stats" class="dictionary-stats"></div>
@@ -545,7 +558,7 @@
         </div>
         <div class="settings-section">
           <h3>折叠偏好</h3>
-          <p style="margin-top: 4px; color: var(--muted); font-size: 12px;">启用滑块将在下次加载时保持该区域折叠。</p>
+          <p style="margin-top: 4px; color: var(--muted); font-size: 12px;">控制主要内容区域的默认展开/折叠状态。启用滑块表示该区域在加载时将保持折叠。</p>
           <div style="margin-top: 12px; font-weight: bold; color: var(--text); margin-bottom: 8px;">听力训练</div>
           <div id="collapse-settings" class="settings-grid"></div>
           <div style="margin-top: 16px; font-weight: bold; color: var(--text); margin-bottom: 8px;">阅读学习</div>
@@ -613,6 +626,32 @@
           <h3>行预览</h3>
           <div id="timing-lines" class="line-list"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 词典详情弹窗 Modal -->
+  <div id="dictionary-modal" class="modal" style="display: none;">
+    <div class="modal-content modal-fullscreen">
+      <div class="modal-header">
+        <h2 id="dictionary-modal-title">词典详情</h2>
+        <button id="btn-close-dictionary" class="close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="dictionary-modal-content"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 句法分析详情弹窗 Modal -->
+  <div id="syntax-modal" class="modal" style="display: none;">
+    <div class="modal-content modal-fullscreen">
+      <div class="modal-header">
+        <h2 id="syntax-modal-title">🌳 句法分析详情</h2>
+        <button id="btn-close-syntax" class="close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="syntax-modal-content" style="padding: 20px;"></div>
       </div>
     </div>
   </div>
@@ -754,7 +793,7 @@
   <!-- Context Menu -->
   <div id="context-menu" class="context-menu"></div>
   
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260201-15"></script>
   <script src="/static/split.js"></script>
 </body>
 </html>

@@ -1,3 +1,110 @@
+// ============ 工具函数 ============
+
+/**
+ * HTML转义函数，防止XSS
+ */
+function escapeHtml(text) {
+  if (!text) return '';
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+/**
+ * 简单的字符串哈希函数，支持Unicode字符
+ * 用于生成稳定的ID
+ */
+function simpleHash(str) {
+  let hash = 0;
+  if (!str) return hash;
+  
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // 转换为32位整数
+  }
+  
+  return Math.abs(hash).toString(36);
+}
+
+// TTS 发音工具（服务端缓存）
+let ttsAudio = null;
+const getTtsUrl = (text, lang = 'ru') => {
+  if (!text) return '';
+  return `/api/tts?lang=${encodeURIComponent(lang)}&text=${encodeURIComponent(text)}`;
+};
+
+const playTts = async (text, lang = 'ru', retries = 2) => {
+  if (!text) return;
+  if (!ttsAudio) ttsAudio = new Audio();
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      ttsAudio.pause();
+      ttsAudio.currentTime = 0;
+      
+      const url = getTtsUrl(text, lang);
+      console.log(`[TTS 尝试 ${attempt}/${retries}] 加载: ${text.substring(0, 20)}...`);
+      
+      // 创建新的 Promise 来处理音频加载
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('加载超时（10秒）'));
+        }, 10000);
+        
+        const cleanup = () => {
+          clearTimeout(timeout);
+          ttsAudio.removeEventListener('canplay', handleCanPlay);
+          ttsAudio.removeEventListener('error', handleError);
+        };
+        
+        const handleCanPlay = () => {
+          cleanup();
+          console.log('[TTS] 音频加载成功');
+          resolve();
+        };
+        
+        const handleError = (e) => {
+          cleanup();
+          const errorCode = ttsAudio.error?.code;
+          const errorMsg = ttsAudio.error?.message || '未知错误';
+          const fullError = `错误代码 ${errorCode}: ${errorMsg}`;
+          console.warn('[TTS] 音频加载失败:', fullError);
+          reject(new Error(fullError));
+        };
+        
+        // 设置事件监听
+        ttsAudio.addEventListener('canplay', handleCanPlay, { once: true });
+        ttsAudio.addEventListener('error', handleError, { once: true });
+        
+        // 设置 src 并开始加载
+        ttsAudio.src = url;
+        ttsAudio.load();
+      });
+      
+      // 播放音频
+      await ttsAudio.play();
+      console.log('[TTS] ✓ 播放成功');
+      return;
+      
+    } catch (e) {
+      console.warn(`[TTS] 尝试 ${attempt} 失败:`, e.message);
+      if (attempt < retries) {
+        // 等待后重试
+        await new Promise(r => setTimeout(r, 1000));
+      } else {
+        // 所有尝试都失败了
+        console.error('[TTS] ✗ 播放失败（已重试）:', e.message);
+      }
+    }
+  }
+};
+
 // Core app state
 const state = {
   subtitles: [],
@@ -43,6 +150,7 @@ const state = {
   folderExpandedStates: {}, // 文件夹展开状态
   // 操作取消标志
   cancelOperation: false,
+  videoDisplayMode: 'waveform', // 视频显示模式：'waveform' 或 'subtitle'
   settings: {
     collapsed: {}, // 各功能区折叠状态
     commonDefaultVocab: true, // 听力和阅读是否使用通用默认生词本
@@ -55,9 +163,17 @@ const state = {
         collapsed: false,
         currentModule: 'control'
       },
+      listening_left: {
+        collapsed: false,
+        currentModule: 'playlist'
+      },
       reading: {
         collapsed: false,
         currentModule: 'reading-dictionary'
+      },
+      reading_left: {
+        collapsed: false,
+        currentModule: 'documents'
       }
     }
   },
@@ -98,12 +214,31 @@ const loadSettings = async () => {
             collapsed: false,
             currentModule: 'control'
           },
+          listening_left: {
+            collapsed: false,
+            currentModule: 'playlist'
+          },
           reading: {
             collapsed: false,
             currentModule: 'reading-dictionary'
+          },
+          reading_left: {
+            collapsed: false,
+            currentModule: 'documents'
           }
         }
       };
+      
+      // 清除无效的collapsed键（只保留实际存在的可折叠元素）
+      const validCollapsedIds = ['playback-body', 'subtitle-list-wrapper', 'reading-text-body'];
+      const cleanedCollapsed = {};
+      for (const id of validCollapsedIds) {
+        if (state.settings.collapsed.hasOwnProperty(id)) {
+          cleanedCollapsed[id] = state.settings.collapsed[id];
+        }
+      }
+      state.settings.collapsed = cleanedCollapsed;
+      
       console.log('✓ 设置已从服务器加载');
     }
   } catch (e) {
@@ -358,6 +493,8 @@ const renderModelSettings = async () => {
 let playlistDragIndex = null;
 let playlistDragIndices = [];
 let isPlaylistDragging = false;
+let documentsDragDocId = null;
+let isDocumentsDragging = false;
 
 // Utility helpers -----------------------------------------------------------
 
@@ -395,18 +532,25 @@ const updatePlayerMediaMode = (isAudio) => {
   const player = $("#player");
   const playbackBody = $("#playback-body");
   const waveform = $("#player-waveform");
+  const toggleBtn = $("#btn-toggle-video-mode");
   if (!player) return;
+  
   // 音频模式：视频高度压缩、取消并排布局
   player.classList.toggle('audio-mode', !!isAudio);
 
   if (playbackBody && waveform) {
     if (!isAudio) {
-      // 视频模式：启用并排布局，右侧波形高度匹配播放器高度
-      playbackBody.classList.add('video-split');
-      syncWaveformHeight();
+      // 视频模式：显示模式切换按钮
+      if (toggleBtn) {
+        toggleBtn.style.display = 'inline-block';
+        updateVideoModeButton();
+      }
+      // 应用视频显示模式
+      applyVideoDisplayMode();
     } else {
-      // 音频模式：关闭并排布局，恢复默认高度
-      playbackBody.classList.remove('video-split');
+      // 音频模式：隐藏模式切换按钮，关闭并排布局，恢复默认高度
+      if (toggleBtn) toggleBtn.style.display = 'none';
+      playbackBody.classList.remove('video-split', 'video-subtitle-mode');
       waveform.style.height = '';
       // 重置 WaveSurfer 的高度选项为默认值 80px
       try {
@@ -416,9 +560,62 @@ const updatePlayerMediaMode = (isAudio) => {
       } catch (e) {
         // 忽略不支持的情况
       }
+      // 确保字幕区域恢复正常
+      const subtitleSection = document.querySelector('.subtitle-section');
+      if (subtitleSection) {
+        subtitleSection.classList.remove('in-video-mode');
+      }
     }
   }
 };
+
+// 应用视频显示模式
+const applyVideoDisplayMode = () => {
+  const playbackBody = $("#playback-body");
+  const mainPanel = document.querySelector('.main-panel');
+  
+  if (!playbackBody || !mainPanel) return;
+  
+  if (state.videoDisplayMode === 'subtitle') {
+    // 视频+字幕模式：使用main-panel的grid布局
+    playbackBody.classList.remove('video-split'); // 移除波形模式的类
+    mainPanel.classList.add('video-subtitle-mode');
+  } else {
+    // 视频+波形模式（默认）：恢复原有布局
+    mainPanel.classList.remove('video-subtitle-mode');
+    playbackBody.classList.add('video-split');
+    syncWaveformHeight();
+  }
+};
+
+// 切换视频显示模式
+const toggleVideoDisplayMode = () => {
+  state.videoDisplayMode = state.videoDisplayMode === 'waveform' ? 'subtitle' : 'waveform';
+  applyVideoDisplayMode();
+  updateVideoModeButton();
+  
+  // 保存到localStorage
+  try {
+    localStorage.setItem('lr-video-display-mode', state.videoDisplayMode);
+  } catch (e) {
+    console.warn('无法保存视频显示模式偏好:', e);
+  }
+};
+
+// 更新视频模式按钮文本
+const updateVideoModeButton = () => {
+  const toggleBtn = $("#btn-toggle-video-mode");
+  if (!toggleBtn) return;
+  
+  if (state.videoDisplayMode === 'waveform') {
+    toggleBtn.textContent = '📝 字幕优先';
+    toggleBtn.title = '切换到视频为主模式';
+  } else {
+    toggleBtn.textContent = '📺 视频优先';
+    toggleBtn.title = '切换到字幕为主模式';
+  }
+};
+
 
 // 同步并排布局下的波形容器与波形图高度
 const syncWaveformHeight = () => {
@@ -647,6 +844,30 @@ const loadPersistedSubtitles = () => {
 };
 
 const persistVocab = async () => {
+  // 先补充所有缺失的lemma字段
+  for (let vb of state.vocabBooks) {
+    if (vb.words) {
+      for (let word of vb.words) {
+        if (word.word && !word.lemma) {
+          try {
+            const response = await fetch('/api/morph/get-lemma', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ word: word.word })
+            });
+            const data = await response.json();
+            if (data.status === 'success' && data.lemma) {
+              word.lemma = data.lemma;
+              console.log(`✓ "${word.word}" 的原型: "${data.lemma}"`);
+            }
+          } catch (e) {
+            console.warn(`获取"${word.word}"的原型失败`, e);
+          }
+        }
+      }
+    }
+  }
+  
   const toSave = state.vocabBooks.map(vb => ({
     id: vb.id,
     name: vb.name,
@@ -654,7 +875,7 @@ const persistVocab = async () => {
   }));
   
   try {
-    await fetch('/api/vocabbooks/save', {
+    const response = await fetch('/api/vocabbooks/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -662,7 +883,8 @@ const persistVocab = async () => {
         currentVocabBookId: state.currentVocabBookId
       })
     });
-    console.log('✓ 生词本已保存到服务器');
+    const result = await response.json();
+    console.log('✓ 生词本已保存到服务器（含原型）', result);
   } catch (e) {
     console.warn('生词本保存失败', e);
   }
@@ -1168,16 +1390,61 @@ function initDictionarySearch() {
       statsEl.innerHTML = '';
     }
   }
+
+  // 快捷查词（供生词本按钮调用）
+  window.quickDictionarySearch = async (word, target = 'dictionary') => {
+    const safeWord = (word || '').trim();
+    if (!safeWord) return;
+
+    // 选择目标模块
+    const isReading = target === 'reading-dictionary';
+    const inputEl = isReading ? readingSearchInput : mainSearchInput;
+    const resultsEl = isReading ? readingResults : mainResults;
+    const statsEl = isReading ? readingStats : mainStats;
+
+    if (inputEl) {
+      inputEl.value = safeWord;
+    }
+
+    // 自动切换到词典模块（右侧栏）
+    try {
+      const moduleName = isReading ? 'reading' : 'listening';
+      activateSidebarModule(moduleName, target, 'right');
+    } catch (_) {}
+
+    await performSearch(safeWord, resultsEl, statsEl);
+  };
   
   // 显示搜索结果
   function displaySearchResults(data, resultsEl, statsEl) {
     let html = '';
     
-    const inputWord = data.morphology?.word || '';
+    // 调试：输出完整响应数据
+    console.log('词典查询响应数据:', data);
+    console.log('千亿词霸数据:', data.qianyix);
     
+    const inputWord = data.morphology?.word || '';
+    const currentWord = data.word || inputWord || '';
+    const baseWord = data.morphology?.analyses?.[0]?.normal_form || currentWord;
+
+    if (currentWord) {
+      html += '<div class="dictionary-pronounce" style="margin-bottom: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">';
+      html += '<span style="font-size: 12px; color: var(--muted);">🔊 发音：</span>';
+      html += `<button class="mini-btn btn-tts" data-tts-word="${escapeHtml(currentWord)}" data-tts-lang="ru">▶ 当前词</button>`;
+      if (baseWord && baseWord.toLowerCase() !== currentWord.toLowerCase()) {
+        html += `<button class="mini-btn btn-tts" data-tts-word="${escapeHtml(baseWord)}" data-tts-lang="ru">▶ 原形</button>`;
+      }
+      html += '</div>';
+    }
+    
+    // 1. 词法分析部分（第一个）
     if (data.morphology && data.morphology.analyses && data.morphology.analyses.length > 0) {
-      html += '<div class="dictionary-analysis" style="margin-bottom: 15px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 4px;">';
-      html += '<strong style="font-size: 14px; margin-bottom: 10px; display: block;">📊 词法分析</strong>';
+      html += '<div class="dictionary-collapsible dictionary-analysis" data-section="morphology">';
+      html += '<div class="dictionary-collapsible-header">';
+      html += '<h4>📊 词法分析</h4>';
+      html += '<span class="dictionary-collapsible-toggle">▾</span>';
+      html += '</div>';
+      html += '<div class="dictionary-collapsible-content">';
       
       html += '<div class="morphology-grid" style="display: grid; gap: 12px; max-height: 150px; overflow-x: auto; padding-right: 4px; scrollbar-width: thin; scrollbar-color: rgba(100, 150, 255, 0.5) rgba(255,255,255,0.1);">';
       
@@ -1222,11 +1489,63 @@ function initDictionarySearch() {
       
       html += '</div>';
       html += '</div>';
+      html += '</div>';
     }
     
-    // 显示变格形式
+    // 2. 显示生词本记录
+    if (data.vocab) {
+      html += '<div class="dictionary-collapsible dictionary-vocab" data-section="vocab">';
+      html += '<div class="dictionary-collapsible-header">';
+      html += '<h4>📖 生词本记录</h4>';
+      html += '<span class="dictionary-collapsible-toggle">▾</span>';
+      html += '</div>';
+      html += '<div class="dictionary-collapsible-content">';
+      html += `<div><strong>释义：</strong>${data.vocab.meaning || '无'}</div>`;
+      if (data.vocab.note) {
+        html += `<div><strong>批注：</strong>${data.vocab.note}</div>`;
+      }
+      html += '</div>';
+      html += '</div>';
+    }
+    
+    // 3. 显示千亿词霸 - 提取基本释义显示，完整内容通过弹窗
+    console.log('🔍 检查千亿词霸数据:', data.qianyix);
+    if (data.qianyix) {
+      console.log('✅ 千亿词霸数据存在，正在渲染...');
+      html += '<div class="dictionary-collapsible dictionary-qianyix" data-section="qianyix">';
+      html += '<div class="dictionary-collapsible-header">';
+      html += `<h4>🔗 千亿词霸</h4>`;
+      html += '<span class="dictionary-collapsible-toggle">▾</span>';
+      html += '</div>';
+      html += '<div class="dictionary-collapsible-content">';
+      html += `<div style="padding: 10px; background: rgba(100, 200, 255, 0.1); border-radius: 4px; border-left: 3px solid #64c8ff;">`;
+      html += `<strong style="color: var(--text);">查询词汇：</strong> ${escapeHtml(data.qianyix.word)}<br>`;
+      // 使用简单哈希函数生成稳定的ID，避免特殊字符问题
+      const wordHash = simpleHash(data.qianyix.word);
+      html += `<div id="qianyix-preview-${wordHash}" class="qianyix-preview-container" style="margin: 12px 0; min-height: 50px; padding: 8px; border-radius: 3px;"><span style="color: var(--muted);">加载中...</span></div>`;
+      html += `<button class="mini-btn btn-view-dictionary" data-word="${escapeHtml(data.qianyix.word)}" data-url="${escapeHtml(data.qianyix.url)}" data-word-hash="${wordHash}" style="margin-top: 8px;">`;
+      html += `📖 查看完整内容`;
+      html += `</button>`;
+      html += `</div>`;
+      html += '</div>';
+      html += '</div>';
+      
+      // 异步加载基本释义内容
+      setTimeout(() => {
+        loadQianyixPreview(data.qianyix.word, data.qianyix.url, wordHash);
+      }, 100);
+    } else {
+      console.log('❌ 千亿词霸数据不存在');
+    }
+    
+    // 4. 显示变格形式
     if (data.inflections && data.inflections.inflections && Object.keys(data.inflections.inflections).length > 0) {
-      html += '<div class="dictionary-inflections" style="margin-bottom: 15px; padding: 15px; background: rgba(100, 150, 255, 0.08); border-radius: 4px;">';
+      html += '<div class="dictionary-collapsible dictionary-inflections" data-section="inflections">';
+      html += '<div class="dictionary-collapsible-header">';
+      html += '<h4>🔄 变格形式</h4>';
+      html += '<span class="dictionary-collapsible-toggle">▾</span>';
+      html += '</div>';
+      html += '<div class="dictionary-collapsible-content">';
       
       const inflections = data.inflections.inflections;
       const posKeys = Object.keys(inflections);
@@ -1255,12 +1574,17 @@ function initDictionarySearch() {
       });
       
       html += '</div>';
+      html += '</div>';
     }
     
-    // 显示词典释义
+    // 5. 显示词典释义
     if (data.dictionary && data.dictionary.length > 0) {
-      html += '<div class="dictionary-entries">';
-      html += `<h4 style="margin-bottom: 10px;">📚 词典释义 (${data.dictionary.length} 个结果)</h4>`;
+      html += '<div class="dictionary-collapsible dictionary-entries" data-section="dictionary">';
+      html += '<div class="dictionary-collapsible-header">';
+      html += `<h4>📚 词典释义 (${data.dictionary.length} 个结果)</h4>`;
+      html += '<span class="dictionary-collapsible-toggle">▾</span>';
+      html += '</div>';
+      html += '<div class="dictionary-collapsible-content">';
       
       data.dictionary.forEach((entry, index) => {
         html += `<div style="margin: 10px 0; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 4px; border-left: 3px solid var(--primary);">`;
@@ -1306,23 +1630,73 @@ function initDictionarySearch() {
       });
       
       html += '</div>';
+      html += '</div>';
     } else {
       html += '<p style="color: var(--muted);">未找到匹配的词典条目</p>';
     }
     
-    // 显示生词本记录
-    if (data.vocab) {
-      html += '<div style="margin-top: 15px; padding: 10px; background: rgba(100, 255, 100, 0.1); border-radius: 4px; border-left: 3px solid #4CAF50;">';
-      html += '<strong>📖 生词本记录：</strong><br>';
-      html += `<div><strong>释义：</strong>${data.vocab.meaning || '无'}</div>`;
-      if (data.vocab.note) {
-        html += `<div><strong>批注：</strong>${data.vocab.note}</div>`;
-      }
-      html += '</div>';
-    }
-    
     resultsEl.innerHTML = html;
     statsEl.innerHTML = `<p style="color: var(--muted); font-size: 12px;">搜索完成: ${new Date().toLocaleString()}</p>`;
+    
+    // 绑定词典模块可折叠部分的事件
+    bindDictionaryCollapsibles(resultsEl);
+
+    // 绑定发音按钮
+    const ttsButtons = resultsEl.querySelectorAll('.btn-tts');
+    ttsButtons.forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const word = btn.dataset.ttsWord || '';
+        const lang = btn.dataset.ttsLang || 'ru';
+        await playTts(word, lang);
+      });
+    });
+  }
+  
+  // 绑定词典模块可折叠部分的事件
+  function bindDictionaryCollapsibles(container) {
+    const collapsibles = container.querySelectorAll('.dictionary-collapsible');
+    
+    // 加载保存的折叠状态
+    const savedStates = localStorage.getItem('dictionaryCollapsedSections');
+    const collapsedSections = savedStates ? JSON.parse(savedStates) : {};
+    
+    collapsibles.forEach(collapsible => {
+      const header = collapsible.querySelector('.dictionary-collapsible-header');
+      const toggle = collapsible.querySelector('.dictionary-collapsible-toggle');
+      const content = collapsible.querySelector('.dictionary-collapsible-content');
+      const sectionName = collapsible.getAttribute('data-section');
+      
+      if (header && toggle && content) {
+        // 恢复保存的折叠状态，如果没有保存则默认展开
+        const shouldCollapse = sectionName && collapsedSections[sectionName];
+        if (shouldCollapse) {
+          collapsible.classList.add('collapsed');
+          toggle.textContent = '▸';
+        } else {
+          collapsible.classList.remove('collapsed');
+          toggle.textContent = '▾';
+        }
+        
+        header.addEventListener('click', () => {
+          collapsible.classList.toggle('collapsed');
+          
+          // 更新切换按钮和保存状态
+          const isNowCollapsed = collapsible.classList.contains('collapsed');
+          if (isNowCollapsed) {
+            toggle.textContent = '▸';
+          } else {
+            toggle.textContent = '▾';
+          }
+          
+          // 保存折叠状态到localStorage
+          if (sectionName) {
+            collapsedSections[sectionName] = isNowCollapsed;
+            localStorage.setItem('dictionaryCollapsedSections', JSON.stringify(collapsedSections));
+          }
+        });
+      }
+    });
   }
   
   // 渲染名词变格形式
@@ -2424,6 +2798,11 @@ const renderTreeNode = (container, nodes, type, level = 0) => {
       
       nodeEl.appendChild(contentEl);
       nodeEl.dataset.folderName = node.name;
+      if (node.folderPath) {
+        nodeEl.dataset.folderPath = node.folderPath;
+      } else if (node.path) {
+        nodeEl.dataset.folderPath = node.path;
+      }
       
       // 检查是否需要固定标题栏（子项目数量超过10个）
       const childCount = countFiles(node);
@@ -2465,6 +2844,10 @@ const renderTreeNode = (container, nodes, type, level = 0) => {
       const labelEl = createEl("span", "tree-node-label");
       labelEl.textContent = node.name;
       labelEl.title = node.name;
+      const textWrapEl = createEl("div", "tree-node-text");
+      if (type === "documents") {
+        textWrapEl.appendChild(labelEl);
+      }
       
       let isActive = false;
       let isSelected = false;
@@ -2475,22 +2858,25 @@ const renderTreeNode = (container, nodes, type, level = 0) => {
       } else if (type === "documents") {
         isActive = node.docId === readingState.currentDocId;
         contentEl.dataset.docId = node.docId;
+        nodeEl.dataset.docId = node.docId;
         
+        const metaLineEl = createEl("div", "tree-node-meta-line");
         const metaEl = createEl("span", "tree-node-meta");
         const doc = node.doc;
         metaEl.textContent = `${doc.totalWords || doc.charCount || 0} 词 · ${doc.charCount || 0} 字`;
-        contentEl.appendChild(metaEl);
+        metaLineEl.appendChild(metaEl);
         
         const progressPercent = doc.readProgress?.pagePercent || doc.readProgress?.scrollPercent || 0;
         if (progressPercent > 0) {
           const progressText = createEl("span", "tree-node-meta");
           progressText.textContent = ` · 进度 ${Math.round(progressPercent)}%`;
-          contentEl.appendChild(progressText);
+          metaLineEl.appendChild(progressText);
           
           const progressBar = createEl("div", "tree-progress-bar");
           progressBar.style.width = `${progressPercent}%`;
           contentEl.appendChild(progressBar);
         }
+        textWrapEl.appendChild(metaLineEl);
       }
       
       contentEl.classList.toggle("active", isActive);
@@ -2498,7 +2884,11 @@ const renderTreeNode = (container, nodes, type, level = 0) => {
       contentEl.appendChild(toggleEl);
       contentEl.appendChild(dragHandleEl);
       contentEl.appendChild(iconEl);
-      contentEl.appendChild(labelEl);
+      if (type === "documents") {
+        contentEl.appendChild(textWrapEl);
+      } else {
+        contentEl.appendChild(labelEl);
+      }
       
       nodeEl.appendChild(contentEl);
       
@@ -3158,7 +3548,8 @@ const createFolder = async (targetType) => {
 };
 
 const renameFolder = async (targetType, nodeData) => {
-  const newName = prompt("请输入新的文件夹名称:", nodeData.name);
+  const displayName = nodeData?.name || (nodeData?.path ? nodeData.path.split(/[\\/]/).pop() : "");
+  const newName = prompt("请输入新的文件夹名称:", displayName);
   if (!newName || !newName.trim()) return;
   
   if (targetType === "playlist-folder") {
@@ -3187,7 +3578,8 @@ const renameFolder = async (targetType, nodeData) => {
       alert(`重命名文件夹失败: ${e.message || '网络错误'}`);
     }
   } else if (targetType === "documents-folder") {
-    renameReadingFolder(nodeData.name, newName.trim());
+    const oldPath = nodeData.path || nodeData.name;
+    renameReadingFolder(oldPath, newName.trim());
   }
 };
 
@@ -3218,7 +3610,7 @@ const deleteFolder = async (targetType, nodeData) => {
       alert(`删除文件夹失败: ${e.message || '网络错误'}`);
     }
   } else if (targetType === "documents-folder") {
-    deleteReadingFolder(nodeData.name);
+    deleteReadingFolder(nodeData.path || nodeData.name);
   }
 };
 
@@ -3584,6 +3976,18 @@ const showDictionaryResult = (bubble, word, data) => {
   let html = `<div class="bubble-word">${word}</div>`;
   
   const inputWord = data.morphology?.word || '';
+  const currentWord = data.word || inputWord || word;
+  const baseWord = data.morphology?.analyses?.[0]?.normal_form || currentWord;
+
+  if (currentWord) {
+    html += `<div class="dict-section" style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
+      <span style="font-size: 11px; color: var(--muted);">🔊 发音：</span>
+      <button class="mini-btn btn-tts" data-tts-word="${escapeHtml(currentWord)}" data-tts-lang="ru">▶ 当前词</button>`;
+    if (baseWord && baseWord.toLowerCase() !== currentWord.toLowerCase()) {
+      html += `<button class="mini-btn btn-tts" data-tts-word="${escapeHtml(baseWord)}" data-tts-lang="ru">▶ 原形</button>`;
+    }
+    html += `</div>`;
+  }
   
   if (data.morphology && data.morphology.analyses && data.morphology.analyses.length > 0) {
     html += `<div class="dict-section">
@@ -3690,6 +4094,17 @@ const showDictionaryResult = (bubble, word, data) => {
   </div>`;
   
   bubble.innerHTML = html;
+
+  // 发音按钮
+  const ttsButtons = bubble.querySelectorAll('.btn-tts');
+  ttsButtons.forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const word = btn.dataset.ttsWord || '';
+      const lang = btn.dataset.ttsLang || 'ru';
+      await playTts(word, lang);
+    });
+  });
   
   // 返回按钮
   const backBtn = bubble.querySelector('.bubble-back-btn');
@@ -3975,7 +4390,7 @@ const showBubbleEditMode = (bubble, word, vocabItem, subtitleItem) => {
   `;
   
   // 保存功能
-  const performSave = () => {
+  const performSave = async () => {
     const meaning = bubble.querySelector('#bubble-meaning').value.trim();
     const note = bubble.querySelector('#bubble-note').value.trim();
     
@@ -4003,8 +4418,25 @@ const showBubbleEditMode = (bubble, word, vocabItem, subtitleItem) => {
         meaning: meaning,
         note: note,
         sentence: `${subtitleItem.userEn || subtitleItem.en || ''} | ${subtitleItem.userZh || subtitleItem.zh || ''}`,
-        source: 'listening'  // 标注为听力模块添加
+        source: 'listening',  // 标注为听力模块添加
+        lemma: null  // 将由后端自动填充
       };
+      
+      // 异步获取原型信息
+      try {
+        const response = await fetch('/api/morph/get-lemma', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word: word })
+        });
+        const data = await response.json();
+        if (data.status === 'success' && data.lemma) {
+          newWord.lemma = data.lemma;
+        }
+      } catch (e) {
+        console.warn('获取原型信息失败', e);
+        // 继续保存，lemma 由后端 save 时补充
+      }
       
       // 在合并模式中检查其他生词本是否已存在该词
       if (state.settings.commonDefaultVocab) {
@@ -4084,6 +4516,80 @@ const showBubbleEditMode = (bubble, word, vocabItem, subtitleItem) => {
   }, true);
 };
 
+// 生成俄语词汇的可能的原型形式（启发式规则）
+const generatePossibleLemmas = (word) => {
+  const lemmas = [word]; // 首先包括词汇本身
+  const lowerWord = word.toLowerCase();
+  
+  // 常见的俄语名词变化规则
+  const nounRules = [
+    // 阴性名词 -а → -а (письма → письмо)
+    { suffix: 'а', replacement: 'о', minLen: 3 },
+    { suffix: 'ы', replacement: '', minLen: 3 },
+    { suffix: 'ы', replacement: 'а', minLen: 3 },
+    { suffix: 'ы', replacement: 'о', minLen: 3 },
+    { suffix: 'е', replacement: 'о', minLen: 3 },  // письме → письмо
+    { suffix: 'е', replacement: '', minLen: 3 },   // доме → дом
+    { suffix: 'а', replacement: '', minLen: 3 },   // книга → книг
+    { suffix: 'ей', replacement: '', minLen: 4 },
+    { suffix: 'ов', replacement: '', minLen: 4 },
+    { suffix: 'и', replacement: 'а', minLen: 3 },
+    { suffix: 'и', replacement: 'о', minLen: 3 },
+    { suffix: 'и', replacement: '', minLen: 3 },
+    { suffix: 'ом', replacement: '', minLen: 3 },  // домом → дом
+    { suffix: 'ом', replacement: 'а', minLen: 3 }, // книгом → книга
+    { suffix: 'ой', replacement: 'ая', minLen: 3 },
+    { suffix: 'ой', replacement: '', minLen: 3 },
+    { suffix: 'ой', replacement: 'а', minLen: 3 },
+    { suffix: 'ую', replacement: 'ая', minLen: 4 },
+    { suffix: 'ую', replacement: '', minLen: 4 },
+  ];
+  
+  // 常见的俄语动词变化规则
+  const verbRules = [
+    { suffix: 'ю', replacement: 'ть', minLen: 3 },   // работаю → работать
+    { suffix: 'ешь', replacement: 'ть', minLen: 4 },
+    { suffix: 'ет', replacement: 'ть', minLen: 4 },  // работает → работать
+    { suffix: 'ем', replacement: 'ть', minLen: 4 },
+    { suffix: 'ете', replacement: 'ть', minLen: 4 },
+    { suffix: 'ют', replacement: 'ть', minLen: 4 },  // работают → работать
+    { suffix: 'ал', replacement: 'ть', minLen: 4 },  // работал → работать
+    { suffix: 'ала', replacement: 'ть', minLen: 4 }, // работала → работать
+    { suffix: 'ало', replacement: 'ть', minLen: 4 },
+    { suffix: 'али', replacement: 'ть', minLen: 4 },
+    { suffix: 'ли', replacement: 'ть', minLen: 4 },
+  ];
+  
+  // 常见的俄语形容词变化规则
+  const adjRules = [
+    { suffix: 'ый', replacement: 'ый', minLen: 3 },   // 保持
+    { suffix: 'ая', replacement: 'ый', minLen: 4 },   // красивая → красивый
+    { suffix: 'ое', replacement: 'ый', minLen: 4 },   // красивое → красивый
+    { suffix: 'ые', replacement: 'ый', minLen: 4 },   // красивые → красивый
+    { suffix: 'ого', replacement: 'ый', minLen: 4 },
+    { suffix: 'ому', replacement: 'ый', minLen: 4 },
+    { suffix: 'ым', replacement: 'ый', minLen: 4 },
+    { suffix: 'ой', replacement: 'ый', minLen: 4 },
+    { suffix: 'ою', replacement: 'ый', minLen: 4 },
+    { suffix: 'ую', replacement: 'ый', minLen: 4 },
+  ];
+  
+  const allRules = [...nounRules, ...verbRules, ...adjRules];
+  
+  // 应用所有规则
+  allRules.forEach(rule => {
+    if (lowerWord.endsWith(rule.suffix) && lowerWord.length >= rule.minLen) {
+      const base = lowerWord.slice(0, -rule.suffix.length);
+      const lemma = base + rule.replacement;
+      if (lemma && lemma !== lowerWord) {
+        lemmas.push(lemma);
+      }
+    }
+  });
+  
+  return lemmas;
+};
+
 const renderSubtitles = () => {
   const list = $("#subtitle-list");
   list.innerHTML = "";
@@ -4125,25 +4631,71 @@ const renderSubtitles = () => {
 
     const text = createEl("div", "text");
     
-    // 高亮生词本中的词汇
+    // 高亮生词本中的词汇（基于原型lemma）
     let enText = item.userEn || item.en || "(空)";
     let zhText = item.userZh || item.zh || "";
     
-    // 为生词本中的词汇添加高亮标记
+    // 为生词本中的词汇添加高亮标记（基于原型而非原始词）
     if (state.vocab && state.vocab.length > 0) {
+      // 首先，获取所有生词本词汇的原型映射
+      const lemmaIndex = {};  // {lemma_lower: vocab_item}
       state.vocab.forEach(vocabItem => {
-        const word = vocabItem.word;
-        if (!word) return;
+        const lemma = vocabItem.lemma || vocabItem.word;
+        const lemmaLower = lemma.toLowerCase();
+        if (!lemmaIndex[lemmaLower]) {
+          lemmaIndex[lemmaLower] = vocabItem;
+        }
+      });
+      
+      // 提取文本中的所有俄语词汇
+      const wordRegex = /[\wа-яА-ЯёЁ]+/g;
+      const matches = [];
+      let match;
+      
+      while ((match = wordRegex.exec(enText)) !== null) {
+        const textWord = match[0];
+        const textWordLower = textWord.toLowerCase();
+        let foundVocab = null;
         
-        // 转义特殊字符
-        const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // 方案1: 先检查是否在生词本原词中精确匹配
+        for (let lemmaKey in lemmaIndex) {
+          if (textWordLower === lemmaIndex[lemmaKey].word.toLowerCase() ||
+              textWordLower === lemmaKey) {
+            foundVocab = lemmaIndex[lemmaKey];
+            break;
+          }
+        }
         
-        // 使用 Unicode 边界匹配，支持俄语等非 ASCII 字符
-        const regex = new RegExp(`(?<=^|\\s|[^\\p{L}])(${escapedWord})(?=$|\\s|[^\\p{L}])`, 'giu');
+        // 方案2: 如果没找到，尝试使用后端API获取原型进行匹配
+        // 注意：这里不能用async，所以改用同步的简单启发式规则
+        if (!foundVocab) {
+          // 使用简单的俄语启发式规则（离线处理，不依赖API）
+          // 对于常见的俄语词尾变化进行处理
+          const possibleLemmas = generatePossibleLemmas(textWord);
+          for (let possibleLemma of possibleLemmas) {
+            const possibleLemmaLower = possibleLemma.toLowerCase();
+            if (lemmaIndex[possibleLemmaLower]) {
+              foundVocab = lemmaIndex[possibleLemmaLower];
+              break;
+            }
+          }
+        }
         
-        enText = enText.replace(regex, (match) => {
-          return `<span class="vocab-highlight" data-word="${word.toLowerCase()}">${match}</span>`;
-        });
+        if (foundVocab) {
+          matches.push({
+            index: match.index,
+            length: textWord.length,
+            text: textWord,
+            vocab: foundVocab
+          });
+        }
+      }
+      
+      // 从后往前替换，避免位置偏移
+      matches.reverse().forEach(m => {
+        const before = enText.substring(0, m.index);
+        const after = enText.substring(m.index + m.length);
+        enText = `${before}<span class="vocab-highlight" data-word="${m.vocab.word.toLowerCase()}" data-lemma="${(m.vocab.lemma || m.vocab.word).toLowerCase()}">${m.text}</span>${after}`;
       });
     }
     
@@ -4285,9 +4837,12 @@ const renderSubtitles = () => {
             evt.stopPropagation();
             evt.preventDefault();
             
-            // 跳转到词典模块并搜索
+            // 关闭气泡并清除选区
             bubble.remove();
             window.getSelection().removeAllRanges();
+            
+            // 切换到右侧栏的词典模块
+            activateSidebarModule('listening', 'dictionary', 'right');
             
             // 确保词典模块展开
             const dictionaryBody = document.getElementById('dictionary-body');
@@ -4306,12 +4861,6 @@ const renderSubtitles = () => {
               if (searchBtn) {
                 searchBtn.click();
               }
-            }
-            
-            // 滚动到词典模块
-            const dictionarySection = document.querySelector('#dictionary-body').closest('.collapsible');
-            if (dictionarySection) {
-              dictionarySection.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
           }, true);
         }
@@ -4368,8 +4917,40 @@ const renderSubtitles = () => {
     const note = createEl("div", "note");
     note.textContent = item.note;
 
+    // 添加"添加到句法分析"按钮
+    const addToSyntaxButton = createEl("div", "add-to-syntax-btn");
+    addToSyntaxButton.innerHTML = '➕';
+    addToSyntaxButton.title = "添加到句法分析输入框";
+    addToSyntaxButton.addEventListener('click', (e) => {
+      e.stopPropagation();
+      
+      // 获取句法分析输入框
+      const syntaxInput = document.getElementById('syntax-input');
+      if (!syntaxInput) return;
+      
+      // 获取当前字幕的俄语文本（优先用户编辑版本）
+      const textToAdd = item.userEn || item.en || "";
+      if (!textToAdd.trim()) return;
+      
+      // 获取当前输入框的内容
+      const currentValue = syntaxInput.value.trim();
+      
+      // 如果输入框为空，直接添加；否则用空格分隔
+      if (currentValue) {
+        syntaxInput.value = currentValue + ' ' + textToAdd;
+      } else {
+        syntaxInput.value = textToAdd;
+      }
+      
+      // 切换到左侧栏的句法分析模块（不影响右侧栏）
+      activateSidebarModule('listening', 'syntax-analysis', 'left');
+      
+      // 聚焦到输入框
+      syntaxInput.focus();
+    });
+
     // include row index before controls for easier scanning
-    row.append(idxLabel, playButton, time, text, note);
+    row.append(idxLabel, playButton, time, text, note, addToSyntaxButton);
     // 取消整个行的点击事件，只保留播放按钮的功能
     row.style.cursor = "default";
     list.appendChild(row);
@@ -4442,8 +5023,16 @@ const renderVocab = () => {
     const sourceTag = state.settings.commonDefaultVocab && item.source ? 
       `<span style="font-size: 10px; color: #999; margin-left: 8px; padding: 2px 6px; background: rgba(255,255,255,0.1); border-radius: 3px;">${item.source === 'listening' ? '听力' : '阅读'}</span>` : '';
     
+    const displayWord = item.lemma || item.word;
+    const originalTag = (item.lemma && item.word && item.lemma.toLowerCase() !== item.word.toLowerCase())
+      ? `<span style="font-size: 11px; color: #bbb; margin-left: 6px;">(${item.word})</span>`
+      : '';
+    
     contentWrapper.innerHTML = `
-      <div class="vocab-word"><strong>${item.word}</strong>${sourceTag}</div>
+      <div class="vocab-word">
+        <strong>${displayWord}</strong>${originalTag}${sourceTag}
+        <button class="mini-btn vocab-dict-btn" data-word="${displayWord}">🔎</button>
+      </div>
       <div class="vocab-meaning-wrapper">
         <label>释义：</label>
         <div class="vocab-meaning" contenteditable="true" data-idx="${idx}" class="vocab-meaning-edit">${item.meaning || ""}</div>
@@ -4505,6 +5094,17 @@ const renderVocab = () => {
       const idx = Number(e.target.dataset.idx);
       state.vocab[idx].sentence = e.target.textContent;
       persistVocab();
+    });
+  });
+
+  // 快捷查词按钮
+  container.querySelectorAll('.vocab-dict-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const word = btn.dataset.word || '';
+      if (window.quickDictionarySearch) {
+        window.quickDictionarySearch(word, 'dictionary');
+      }
     });
   });
 };
@@ -5252,11 +5852,6 @@ const renderCollapseSettings = () => {
   const items = [
     { id: "playback-body", label: "播放器", icon: "📽️" },
     { id: "subtitle-list-wrapper", label: "字幕列表", icon: "📄" },
-    { id: "editor-body", label: "字幕编辑", icon: "✏️" },
-    { id: "control-body", label: "播放控制", icon: "⚙️" },
-    { id: "playlist-body", label: "播放列表", icon: "📋" },
-    { id: "recording-body", label: "跟读录音", icon: "🎤" },
-    { id: "vocab-body", label: "生词本", icon: "📚" },
   ];
   
   container.innerHTML = "";
@@ -5340,7 +5935,7 @@ const renderCollapseSettings = () => {
     container.appendChild(wrap);
   });
   
-  console.log("✓ iOS 开关已渲染，共 7 个");
+  console.log("✓ iOS 开关已渲染，共 2 个");
 };
 
 // 为阅读模块渲染折叠设置
@@ -5361,11 +5956,7 @@ const renderReadingCollapseSettings = () => {
   container.style.boxSizing = "border-box";
   
   const items = [
-    { id: "reading-documents-body", label: "文档列表", icon: "📂" },
     { id: "reading-text-body", label: "阅读内容", icon: "📖" },
-    { id: "reading-notes-body", label: "笔记", icon: "📝" },
-    { id: "reading-nav-body", label: "阅读进度", icon: "📊" },
-    { id: "reading-vocab-body", label: "生词本", icon: "📚" },
   ];
   
   container.innerHTML = "";
@@ -5448,7 +6039,7 @@ const renderReadingCollapseSettings = () => {
     container.appendChild(wrap);
   });
   
-  console.log("✓ 阅读模块 iOS 开关已渲染，共 5 个");
+  console.log("✓ 阅读模块 iOS 开关已渲染，共 1 个");
 };
 
 // 实时获取转录进度
@@ -5733,12 +6324,12 @@ const bindInputs = () => {
   // 拖拽导入支持
   const body = document.body;
   body.addEventListener('dragover', (e) => {
-    if (isPlaylistDragging) return; // 内部排序时不拦截
+    if (isPlaylistDragging || isDocumentsDragging) return; // 内部排序时不拦截
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   });
   body.addEventListener('drop', async (e) => {
-    if (isPlaylistDragging) return; // 内部排序时不拦截
+    if (isPlaylistDragging || isDocumentsDragging) return; // 内部排序时不拦截
     e.preventDefault();
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
@@ -6578,6 +7169,22 @@ const init = async () => {
       timeInput.select(); // 选中所有文本便于快速替换
     });
   }
+  
+  // 绑定视频显示模式切换按钮
+  const btnToggleVideoMode = $("#btn-toggle-video-mode");
+  if (btnToggleVideoMode) {
+    btnToggleVideoMode.addEventListener("click", toggleVideoDisplayMode);
+  }
+  
+  // 从localStorage加载视频显示模式偏好
+  try {
+    const savedMode = localStorage.getItem('lr-video-display-mode');
+    if (savedMode === 'subtitle' || savedMode === 'waveform') {
+      state.videoDisplayMode = savedMode;
+    }
+  } catch (e) {
+    console.warn('无法加载视频显示模式偏好:', e);
+  }
 };
 
 window.addEventListener("DOMContentLoaded", async () => {
@@ -6601,6 +7208,7 @@ document.addEventListener("contextmenu", (e) => {
 const readingState = {
   currentDocId: null,
   documents: [], // 存储已导入的文档列表
+  folders: [], // 阅读文档文件夹列表
   text: "", // 完整文本内容
   totalChars: 0, // 总字符数
   scrollPercent: 0, // 滚动百分比
@@ -6662,37 +7270,7 @@ const initReadingFileUpload = () => {
     fileInput.value = '';
   });
   
-  // 添加拖拽上传支持
-  const documentsBody = $('#reading-documents-body');
-  if (documentsBody) {
-    documentsBody.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      documentsBody.style.backgroundColor = 'rgba(100, 150, 255, 0.1)';
-      documentsBody.style.borderColor = 'var(--accent)';
-    });
-    
-    documentsBody.addEventListener('dragleave', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      documentsBody.style.backgroundColor = '';
-      documentsBody.style.borderColor = '';
-    });
-    
-    documentsBody.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      documentsBody.style.backgroundColor = '';
-      documentsBody.style.borderColor = '';
-      
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length === 0) return;
-      
-      for (const file of files) {
-        await uploadReadingDocument(file);
-      }
-    });
-  }
+  // 拖拽上传与内部移动由列表渲染逻辑统一处理
   
   // 清空文档列表
   const clearBtn = $('#btn-reading-clear-documents');
@@ -6718,20 +7296,20 @@ const renderReadingDocumentsList = () => {
     documentsTitle.textContent = `文档列表 (${readingState.documents.length})`;
   }
   
-  if (readingState.documents.length === 0) {
+  if (readingState.documents.length === 0 && (!readingState.folders || readingState.folders.length === 0)) {
     listDiv.innerHTML = '<p style="color: var(--muted); text-align: center; padding: 12px; font-size: 12px;">暂无文档</p>';
     return;
   }
   
   // 构建树形结构
-  const treeData = buildDocumentsTree(readingState.documents);
+  const treeData = buildDocumentsTree(readingState.documents, readingState.folders);
   
   // 渲染树形结构
   listDiv.innerHTML = "";
   renderTreeNode(listDiv, treeData, "documents");
   
-  // 绑定点击事件
-  bindDocumentsEvents(listDiv);
+  // 绑定拖拽事件（上传/移动）
+  bindDocumentsDragDrop(listDiv);
   
   // 绑定右键菜单事件
   bindDocumentsContextMenu(listDiv);
@@ -6739,51 +7317,68 @@ const renderReadingDocumentsList = () => {
   // 绑定新建文件夹按钮事件
   const createFolderBtn = document.getElementById('btn-create-folder');
   if (createFolderBtn) {
-    createFolderBtn.addEventListener('click', async () => {
-      const folderName = prompt('请输入文件夹名称:');
-      if (folderName && folderName.trim()) {
-        await createFolder(folderName.trim());
-      }
-    });
+    if (!createFolderBtn.dataset.bound) {
+      createFolderBtn.addEventListener('click', async () => {
+        const folderName = prompt('请输入文件夹名称:');
+        if (folderName && folderName.trim()) {
+          await createReadingFolder(folderName.trim());
+        }
+      });
+      createFolderBtn.dataset.bound = "1";
+    }
   }
 };
 
-const buildDocumentsTree = (documents) => {
+const buildDocumentsTree = (documents, folders = []) => {
   const tree = { children: [], name: "root", type: "folder" };
   
-  documents.forEach((doc) => {
+  const ensureFolderPath = (folderPath) => {
+    if (!folderPath) return tree;
+    const parts = folderPath.split(/[\\/]/).filter(Boolean);
+    let currentNode = tree;
+    let currentPath = "";
+    parts.forEach((part) => {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      let folderNode = currentNode.children.find(
+        child => child.type === "folder" && child.name === part
+      );
+      if (!folderNode) {
+        const stateKey = `documents/${currentPath}`;
+        folderNode = {
+          name: part,
+          type: "folder",
+          path: stateKey,
+          folderPath: currentPath,
+          children: [],
+          expanded: state.folderExpandedStates[stateKey] || false
+        };
+        currentNode.children.push(folderNode);
+      }
+      currentNode = folderNode;
+    });
+    return currentNode;
+  };
+  
+  const sortedDocs = [...documents].sort((a, b) => {
+    const aFolder = (a.folder || "").toLowerCase();
+    const bFolder = (b.folder || "").toLowerCase();
+    if (aFolder !== bFolder) return aFolder.localeCompare(bFolder);
+    const aName = (a.filename || "").toLowerCase();
+    const bName = (b.filename || "").toLowerCase();
+    return aName.localeCompare(bName);
+  });
+  
+  // 先创建所有空文件夹
+  const folderPaths = (folders || []).map(f => f.path || f).filter(Boolean);
+  folderPaths.forEach((folderPath) => {
+    ensureFolderPath(folderPath);
+  });
+  
+  sortedDocs.forEach((doc) => {
     const name = doc.filename || "";
     const folder = doc.folder || "";
     
-    let currentNode = tree;
-    let currentPath = "";
-    
-    // 处理文件夹路径
-    if (folder) {
-      const folderParts = folder.split(/[\\/]/);
-      folderParts.forEach((part) => {
-        if (part) {
-          currentPath = currentPath ? `${currentPath}/${part}` : part;
-          
-          let folderNode = currentNode.children.find(
-            child => child.type === "folder" && child.name === part
-          );
-          
-          if (!folderNode) {
-            folderNode = {
-              name: part,
-              type: "folder",
-              path: `documents/${currentPath}`,
-              children: [],
-              expanded: false
-            };
-            currentNode.children.push(folderNode);
-          }
-          
-          currentNode = folderNode;
-        }
-      });
-    }
+    const currentNode = ensureFolderPath(folder) || tree;
     
     // 添加文件
     currentNode.children.push({
@@ -6794,6 +7389,22 @@ const buildDocumentsTree = (documents) => {
     });
   });
   
+  const sortNodes = (node) => {
+    node.children.sort((a, b) => {
+      const aIsFolder = a.type === "folder";
+      const bIsFolder = b.type === "folder";
+      if (aIsFolder && !bIsFolder) return -1;
+      if (!aIsFolder && bIsFolder) return 1;
+      const aName = (a.name || "").toLowerCase();
+      const bName = (b.name || "").toLowerCase();
+      return aName.localeCompare(bName);
+    });
+    node.children.forEach(child => {
+      if (child.type === "folder") sortNodes(child);
+    });
+  };
+  
+  sortNodes(tree);
   return tree.children;
 };
 
@@ -6823,11 +7434,12 @@ const bindDocumentsContextMenu = (listDiv) => {
       const idx = nodeEl.dataset.index;
       const docId = nodeEl.dataset.docId;
       const folderName = nodeEl.dataset.folderName;
+      const folderPath = nodeEl.dataset.folderPath;
       
       if (docId !== undefined && docId !== null) {
         showContextMenu(e, "documents-file", { docId: docId });
-      } else if (folderName) {
-        showContextMenu(e, "documents-folder", { name: folderName });
+      } else if (folderName || folderPath) {
+        showContextMenu(e, "documents-folder", { name: folderName, path: folderPath || folderName });
       } else {
         showContextMenu(e, "documents-root", null);
       }
@@ -6837,6 +7449,115 @@ const bindDocumentsContextMenu = (listDiv) => {
   });
   
   listDiv.dataset.contextMenuBound = "1";
+};
+
+const bindDocumentsDragDrop = (listDiv) => {
+  if (listDiv.dataset.treeDragBound) return;
+  
+  listDiv.addEventListener("dragstart", (e) => {
+    const contentEl = e.target.closest(".tree-node-content");
+    if (!contentEl) return;
+    
+    const docId = contentEl.dataset.docId;
+    if (!docId) return;
+    
+    documentsDragDocId = docId;
+    isDocumentsDragging = true;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.dropEffect = "move";
+    e.dataTransfer.setData("application/x-documents-drag", docId);
+    e.dataTransfer.setData("text/plain", docId);
+    
+    const nodeEl = contentEl.closest(".tree-node");
+    if (nodeEl) nodeEl.classList.add("dragging");
+    listDiv.classList.add("dragging-active");
+  });
+  
+  listDiv.addEventListener("dragover", (e) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "copy";
+      listDiv.classList.add("drag-over-drop");
+      return;
+    }
+    
+    if (!documentsDragDocId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+    
+    listDiv.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+    const targetNode = e.target.closest(".tree-node");
+    const targetContent = e.target.closest(".tree-node-content");
+    const folderPath = targetNode?.dataset.folderPath;
+    
+    if (folderPath && targetContent) {
+      targetContent.classList.add("drag-over-folder");
+    }
+  });
+  
+  listDiv.addEventListener("dragenter", (e) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      listDiv.classList.add("drag-over-drop");
+    } else if (documentsDragDocId) {
+      e.preventDefault();
+    }
+  });
+  
+  listDiv.addEventListener("dragleave", () => {
+    listDiv.classList.remove("drag-over-drop");
+    listDiv.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+  });
+  
+  listDiv.addEventListener("drop", async (e) => {
+    const targetNode = e.target.closest(".tree-node");
+    const folderPath = targetNode?.dataset.folderPath || "";
+    
+    if (e.dataTransfer.files.length > 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      listDiv.classList.remove("drag-over-drop");
+      listDiv.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+      
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length === 0) return;
+      
+      for (const file of files) {
+        await uploadReadingDocument(file, folderPath);
+      }
+      return;
+    }
+    
+    if (!documentsDragDocId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const doc = readingState.documents.find(d => d.id === documentsDragDocId);
+    if (!doc) return;
+    
+    const normalizedTarget = folderPath || "";
+    const currentFolder = doc.folder || "";
+    if (normalizedTarget === currentFolder) return;
+    
+    await moveDocumentToFolder(doc.id, normalizedTarget);
+    
+    listDiv.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+    documentsDragDocId = null;
+    isDocumentsDragging = false;
+  });
+  
+  listDiv.addEventListener("dragend", () => {
+    documentsDragDocId = null;
+    isDocumentsDragging = false;
+    listDiv.classList.remove("drag-over-drop");
+    listDiv.classList.remove("dragging-active");
+    listDiv.querySelectorAll(".dragging").forEach(el => el.classList.remove("dragging"));
+    listDiv.querySelectorAll(".drag-over-folder").forEach(el => el.classList.remove("drag-over-folder"));
+  });
+  
+  listDiv.dataset.treeDragBound = "1";
 };
 
 // 删除文档
@@ -6866,6 +7587,19 @@ const deleteReadingDocument = async (docId) => {
     $('#reading-content').innerHTML = '<p style="color: var(--muted); text-align: center; padding: 20px;">请从文档列表中选择文档</p>';
     $('#reading-current-file').textContent = '未选择';
     updateReadingProgress();
+  }
+};
+
+// 加载阅读文件夹列表
+const loadReadingFolders = async () => {
+  try {
+    const response = await fetch('/api/reading/list-folders');
+    const data = await response.json();
+    if (data.status === 'success' && Array.isArray(data.folders)) {
+      readingState.folders = data.folders;
+    }
+  } catch (e) {
+    console.warn('加载文件夹列表失败', e);
   }
 };
 
@@ -6905,8 +7639,9 @@ const createReadingFolder = async (folderName, parentPath = "") => {
       throw new Error(data.error || '创建文件夹失败');
     }
     
-    // 重新加载文档列表
+    // 重新加载文档与文件夹列表
     await loadReadingDocuments();
+    await loadReadingFolders();
     renderReadingDocumentsList();
     
     return true;
@@ -6933,8 +7668,9 @@ const deleteReadingFolder = async (folderPath) => {
       throw new Error(data.error || '删除文件夹失败');
     }
     
-    // 重新加载文档列表
+    // 重新加载文档与文件夹列表
     await loadReadingDocuments();
+    await loadReadingFolders();
     renderReadingDocumentsList();
     
     return true;
@@ -6959,8 +7695,9 @@ const renameReadingFolder = async (oldPath, newName) => {
       throw new Error(data.error || '重命名文件夹失败');
     }
     
-    // 重新加载文档列表
+    // 重新加载文档与文件夹列表
     await loadReadingDocuments();
+    await loadReadingFolders();
     renderReadingDocumentsList();
     
     return true;
@@ -6992,6 +7729,7 @@ const moveDocumentToFolder = async (docId, targetFolder) => {
     }
     
     localStorage.setItem('readingDocuments', JSON.stringify(readingState.documents));
+    await loadReadingFolders();
     renderReadingDocumentsList();
     
     return true;
@@ -7243,25 +7981,63 @@ const setupScrollListener = () => {
 };
 
 // 高亮阅读内容中的词汇（带批注），并提供悬浮气泡显示批注
-const highlightReadingVocabInContent = () => {
+const highlightReadingVocabInContent = async () => {
   const contentDiv = $('#reading-content');
   if (!contentDiv) return;
 
   const currentBook = state.vocabBooks.find(v => v.id === readingState.currentVocabBookId);
   if (!currentBook || !currentBook.words || currentBook.words.length === 0) return;
 
-  // 标记所有生词（含无批注的）
+  // 获取所有生词（含原型信息）
   const vocabItems = currentBook.words
     .filter(w => w.word && w.word.trim())
     .map(w => ({
       word: w.word,
       wordLower: w.word.toLowerCase(),
+      lemma: w.lemma || w.word,  // 使用 lemma 字段作为原型
+      lemmaLower: (w.lemma || w.word).toLowerCase(),
       meaning: w.meaning || '',
       note: w.note || ''
     }));
 
   if (!vocabItems.length) return;
 
+  try {
+    // 调用后端 API 获取高亮和匹配信息
+    const text = contentDiv.textContent;
+    const response = await fetch('/api/morph/highlight-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: text,
+        vocabWords: currentBook.words
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.status !== 'success') {
+      console.warn('后端高亮处理失败，使用本地高亮', data.error);
+      highlightReadingVocabInContent_LocalFallback(vocabItems, contentDiv);
+      return;
+    }
+
+    // 用高亮的 HTML 替换内容
+    if (data.highlighted_text) {
+      contentDiv.innerHTML = data.highlighted_text;
+    }
+
+    // 绑定高亮词汇的交互事件
+    attachVocabHighlightEvents(contentDiv, vocabItems, data.matches || []);
+
+  } catch (error) {
+    console.warn('高亮处理出错，使用本地高亮', error);
+    highlightReadingVocabInContent_LocalFallback(vocabItems, contentDiv);
+  }
+};
+
+// 本地高亮回退方案（原型识别依赖客户端的简单逻辑）
+const highlightReadingVocabInContent_LocalFallback = (vocabItems, contentDiv) => {
   // 标准转义，匹配正则特殊字符与反斜杠/方括号
   const escapeRegExp = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -7290,10 +8066,23 @@ const highlightReadingVocabInContent = () => {
     const matches = [];
 
     vocabItems.forEach(item => {
-      const regex = new RegExp(`(?<=^|\\s|[^\\p{L}])(${escapeRegExp(item.word)})(?=$|\\s|[^\\p{L}])`, 'giu');
-      for (const match of text.matchAll(regex)) {
-        matches.push({ index: match.index, len: match[1].length, item });
+      // 同时匹配原始词汇和原型（如果不同）
+      const wordsToMatch = [item.word];
+      if (item.lemmaLower !== item.wordLower) {
+        wordsToMatch.push(item.lemma);
       }
+
+      wordsToMatch.forEach(wordToMatch => {
+        const regex = new RegExp(`(?<=^|\\s|[^\\p{L}])(${escapeRegExp(wordToMatch)})(?=$|\\s|[^\\p{L}])`, 'giu');
+        for (const match of text.matchAll(regex)) {
+          matches.push({ 
+            index: match.index, 
+            len: match[1].length, 
+            item,
+            matchedText: match[1]
+          });
+        }
+      });
     });
 
     if (!matches.length) return;
@@ -7309,6 +8098,7 @@ const highlightReadingVocabInContent = () => {
       const span = document.createElement('span');
       span.className = 'vocab-highlight';
       span.dataset.word = m.item.wordLower;
+      span.dataset.lemma = m.item.lemmaLower;
       span.dataset.meaning = m.item.meaning;
       span.dataset.note = m.item.note;
       span.textContent = text.substr(m.index, m.len);
@@ -7323,20 +8113,39 @@ const highlightReadingVocabInContent = () => {
     node.parentNode.replaceChild(frag, node);
   });
 
-  // 悬浮展示批注
+  // 附加事件
+  attachVocabHighlightEvents(contentDiv, vocabItems, []);
+};
+
+// 为高亮词汇绑定交互事件
+const attachVocabHighlightEvents = (contentDiv, vocabItems, matches) => {
   const spans = contentDiv.querySelectorAll('.vocab-highlight');
   spans.forEach(span => {
-    const vocab = vocabItems.find(v => v.wordLower === span.dataset.word);
-    if (!vocab) return;
+    // 优先从 data 属性获取信息
+    const meaning = span.dataset.meaning || '';
+    const note = span.dataset.note || '';
+    const lemma = span.dataset.lemma || span.dataset.word;
+    const word = span.textContent;
 
     const showBubble = () => {
       document.querySelectorAll('.vocab-hover-bubble').forEach(b => b.remove());
       const bubble = createEl('div', 'vocab-hover-bubble');
-      bubble.innerHTML = `
-        <div class="bubble-word">${vocab.word}</div>
-        ${vocab.meaning ? `<div class="bubble-meaning">${vocab.meaning}</div>` : ''}
-        ${vocab.note ? `<div class="bubble-note"><strong>批注：</strong>${vocab.note}</div>` : ''}
-      `;
+      
+      // 显示原始词、原型和其他信息
+      let bubbleContent = `<div class="bubble-word">${word}`;
+      if (lemma && lemma !== word.toLowerCase()) {
+        bubbleContent += ` <span style="font-size: 0.8em; opacity: 0.7;">[${lemma}]</span>`;
+      }
+      bubbleContent += `</div>`;
+      
+      if (meaning) {
+        bubbleContent += `<div class="bubble-meaning">${meaning}</div>`;
+      }
+      if (note) {
+        bubbleContent += `<div class="bubble-note"><strong>📌 批注：</strong>${note}</div>`;
+      }
+      
+      bubble.innerHTML = bubbleContent;
       document.body.appendChild(bubble);
 
       const rect = span.getBoundingClientRect();
@@ -7368,6 +8177,15 @@ const highlightReadingVocabInContent = () => {
           bubble.remove();
         }
       }, 100);
+    });
+
+    // 右键菜单显示原型信息
+    span.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (lemma && lemma !== word.toLowerCase()) {
+        const message = `词汇：${word}\n原型：${lemma}\n词义：${meaning || '(无)'}`;
+        alert(message);
+      }
     });
   });
 };
@@ -7420,9 +8238,12 @@ const handleTextSelection = () => {
         evt.stopPropagation();
         evt.preventDefault();
         
-        // 跳转到词典模块并搜索
+        // 关闭气泡并清除选区
         bubble.remove();
         window.getSelection().removeAllRanges();
+        
+        // 切换到右侧栏的词典模块
+        activateSidebarModule('reading', 'reading-dictionary', 'right');
         
         // 确保词典模块展开
         const dictionaryBody = document.getElementById('reading-dictionary-body');
@@ -7441,12 +8262,6 @@ const handleTextSelection = () => {
           if (searchBtn) {
             searchBtn.click();
           }
-        }
-        
-        // 滚动到词典模块
-        const dictionarySection = document.querySelector('#reading-dictionary-body').closest('.collapsible');
-        if (dictionarySection) {
-          dictionarySection.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
       }, true);
     }
@@ -7523,8 +8338,25 @@ const showBubbleEditModeForReading = (bubble, word, vocabItem) => {
         note: note,
         context: readingState.selectedText,
         addedTime: new Date().toISOString(),
-        source: 'reading'  // 标注为阅读模块添加
+        source: 'reading',  // 标注为阅读模块添加
+        lemma: null  // 将由后端自动填充
       };
+      
+      // 异步获取原型信息
+      try {
+        const response = await fetch('/api/morph/get-lemma', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word: word })
+        });
+        const data = await response.json();
+        if (data.status === 'success' && data.lemma) {
+          newWord.lemma = data.lemma;
+        }
+      } catch (e) {
+        console.warn('获取原型信息失败', e);
+        // 继续保存，lemma 由后端 save 时补充
+      }
       
       // 在合并模式中，检查听力生词本是否也有这个词
       if (state.settings.commonDefaultVocab) {
@@ -7940,6 +8772,9 @@ const initReadingModule = async () => {
     }
   }
   
+  await loadReadingDocuments();
+  await loadReadingFolders();
+  
   // 确保默认生词本配置正确（合并或分离）
   await ensureDefaultVocabBooks();
   
@@ -7950,7 +8785,7 @@ const initReadingModule = async () => {
   initReadingNotes();
   initReadingVocab();
   
-  // 渲染文档列表（加载之前导入的数据）
+  // 渲染文档列表
   renderReadingDocumentsList();
   
   // 渲染生词本选择器和列表
@@ -8839,15 +9674,788 @@ const initDOMObserver = () => {
   });
 };
 
+// ============ 千亿词霸和词典弹窗功能 ============
+
+/**
+ * 加载千亿词霸的基本释义预览
+ */
+async function loadQianyixPreview(word, url, wordHash) {
+  const previewId = wordHash ? `qianyix-preview-${wordHash}` : `qianyix-preview-${simpleHash(word)}`;
+  const previewEl = document.getElementById(previewId);
+  if (!previewEl) return;
+  
+  try {
+    // 调用后端API获取网页内容并提取基本释义
+    const response = await fetch('/api/fetch-webpage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: url,
+        selector: '#base0 > div.panel-body.view'  // 基本释义选择器
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (data.status === 'success' && data.content) {
+      // 创建一个临时容器来显示内容
+      const container = document.createElement('div');
+      container.innerHTML = data.content;
+      
+      // 清理HTML（移除脚本、样式和工具栏，但保留重音标记<b>）
+      const scripts = container.querySelectorAll('script, style, .basic-tool');
+      scripts.forEach(s => s.remove());
+      
+      // 移除音频播放器链接
+      const speakers = container.querySelectorAll('.speaker');
+      speakers.forEach(s => s.remove());
+      
+      // 移除拼音部分（通常为空）
+      const pinyin = container.querySelectorAll('.pinyin');
+      pinyin.forEach(p => p.remove());
+      
+      // 设置内容
+      previewEl.innerHTML = container.innerHTML;
+      
+      // 移除高度限制，自动适配内容
+      previewEl.style.maxHeight = 'none';
+      previewEl.style.overflow = 'visible';
+      
+      // 添加样式适配主题
+      previewEl.style.fontSize = '13px';
+      previewEl.style.lineHeight = '1.6';
+      previewEl.style.color = 'var(--text)';
+      previewEl.style.background = 'rgba(255, 255, 255, 0.05)';
+    } else {
+      previewEl.innerHTML = '<span style="color: var(--muted);">无法加载预览内容</span>';
+    }
+  } catch (error) {
+    console.error('加载千亿词霸预览失败:', error);
+    previewEl.innerHTML = '<span style="color: var(--danger);">加载失败</span>';
+  }
+}
+
+/**
+ * 显示词典弹窗
+ */
+function showDictionaryModal(word, url) {
+  const modal = document.getElementById('dictionary-modal');
+  const title = document.getElementById('dictionary-modal-title');
+  const content = document.getElementById('dictionary-modal-content');
+  
+  if (!modal) return;
+  
+  title.textContent = `📖 ${word} - 千亿词霸`;
+  
+  // 直接用iframe显示原网页
+  content.innerHTML = '';
+  const iframe = document.createElement('iframe');
+  iframe.src = url;
+  iframe.style.width = '100%';
+  iframe.style.height = '100%';
+  iframe.style.border = 'none';
+  iframe.style.backgroundColor = 'white';
+  content.appendChild(iframe);
+  
+  modal.style.display = 'flex';
+}
+/**
+ * 关闭词典弹窗
+ */
+function closeDictionaryModal() {
+  const modal = document.getElementById('dictionary-modal');
+  if (modal) {
+    modal.style.display = 'none';
+  }
+}
+
+/**
+ * 初始化词典弹窗事件
+ */
+function initDictionaryModal() {
+  const closeBtn = document.getElementById('btn-close-dictionary');
+  const modal = document.getElementById('dictionary-modal');
+  
+  if (closeBtn) {
+    closeBtn.addEventListener('click', closeDictionaryModal);
+  }
+  
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) {
+        closeDictionaryModal();
+      }
+    });
+  }
+  
+  // 事件委托：为"查看完整内容"按钮添加点击监听
+  document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('btn-view-dictionary')) {
+      const word = e.target.dataset.word;
+      const url = e.target.dataset.url;
+      showDictionaryModal(word, url);
+    }
+  });
+}
+
 // 在DOM加载完成后初始化
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     initSidebar();
     initAutoResizeTextareas();
     initDOMObserver();
+    initDictionaryModal();
+    initSyntaxAnalysis();
   });
 } else {
   initSidebar();
   initAutoResizeTextareas();
   initDOMObserver();
+  initDictionaryModal();
+  initSyntaxAnalysis();
+}
+
+// ============ 句法分析模块 ============
+
+// 词性标签中文映射
+const POS_MAP = {
+  'NOUN': '名词',
+  'VERB': '动词',
+  'ADJ': '形容词',
+  'ADV': '副词',
+  'PRON': '代词',
+  'DET': '限定词',
+  'ADP': '介词',
+  'NUM': '数词',
+  'CONJ': '连词',
+  'CCONJ': '并列连词',
+  'SCONJ': '从属连词',
+  'PART': '小品词',
+  'INTJ': '感叹词',
+  'PROPN': '专有名词',
+  'PUNCT': '标点',
+  'SYM': '符号',
+  'X': '其他',
+  'AUX': '助动词'
+};
+
+// 依存关系标签中文映射
+const DEP_MAP = {
+  'root': '根节点',
+  'nsubj': '主语',
+  'obj': '宾语',
+  'iobj': '间接宾语',
+  'csubj': '从句主语',
+  'ccomp': '补语从句',
+  'xcomp': '开放补语',
+  'obl': '斜格补语',
+  'vocative': '呼格',
+  'expl': '虚词',
+  'dislocated': '错位成分',
+  'advcl': '状语从句',
+  'advmod': '状语修饰',
+  'discourse': '话语标记',
+  'aux': '助动词',
+  'cop': '系动词',
+  'mark': '标记',
+  'nmod': '名词修饰',
+  'appos': '同位语',
+  'nummod': '数量修饰',
+  'acl': '关系从句',
+  'amod': '形容词修饰',
+  'det': '限定词',
+  'clf': '量词',
+  'case': '格标记',
+  'conj': '并列',
+  'cc': '并列连词',
+  'fixed': '固定表达',
+  'flat': '扁平结构',
+  'compound': '复合词',
+  'list': '列表',
+  'parataxis': '并列结构',
+  'orphan': '省略',
+  'goeswith': '连写',
+  'reparandum': '修正',
+  'punct': '标点',
+  'dep': '依存关系'
+};
+
+// 转换词性标签为中文
+function translatePOS(pos) {
+  return POS_MAP[pos] || pos;
+}
+
+// 转换依存关系为中文
+function translateDep(dep) {
+  return DEP_MAP[dep] || dep;
+}
+
+// 实体类型中文映射
+const ENTITY_TYPE_MAP = {
+  'PER': '人名',
+  'LOC': '地名',
+  'ORG': '机构',
+  'DATE': '日期',
+  'TIME': '时间',
+  'MONEY': '金额',
+  'PERCENT': '百分比',
+  'FACILITY': '设施',
+  'PRODUCT': '产品',
+  'EVENT': '事件',
+  'WORK_OF_ART': '艺术作品',
+  'LAW': '法律',
+  'LANGUAGE': '语言',
+  'NORP': '国籍/宗教/政治团体',
+  'GPE': '地缘政治实体',
+  'CARDINAL': '基数',
+  'ORDINAL': '序数',
+  'QUANTITY': '数量'
+};
+
+// 转换实体类型为中文
+function translateEntityType(type) {
+  return ENTITY_TYPE_MAP[type] || type;
+}
+
+// 从head_id构建依存树的递归函数（不依赖arcs，直接从head_id关系构建）
+function buildDependencyTreeFromHeadId(tokenMap, parentId, allTokens, level = 0, visited = new Set(), ancestorPrefix = '') {
+  if (!tokenMap || !allTokens) return '';
+  
+  // 防止无限递归
+  const parentIdStr = String(parentId);
+  if (visited.has(parentIdStr)) {
+    console.warn(`[依存树] 检测到循环依赖: ${parentId}`);
+    return '';
+  }
+  
+  // 防止过深的递归
+  if (level > 20) {
+    console.warn(`[依存树] 递归深度超过20层`);
+    return '';
+  }
+  
+  visited.add(parentIdStr);
+  
+  // 找所有head_id等于parentId的tokens（即依赖于parentId的tokens）
+  const children = allTokens.filter(token => {
+    return String(token.head_id) === parentIdStr;
+  });
+  
+  let html = '';
+  
+  children.forEach((token, idx) => {
+    const isLast = idx === children.length - 1;
+    
+    // 构建当前节点的前缀
+    const currentPrefix = ancestorPrefix + (isLast ? '└─ ' : '├─ ');
+    
+    // 构建子节点应该使用的祖先前缀
+    const childAncestorPrefix = ancestorPrefix + (isLast ? '   ' : '│  ');
+    
+    html += `<div style="padding: 1px 0; line-height: 1.5; font-family: 'Consolas', monospace;">`;
+    html += `<span style="color: #666;">${currentPrefix}</span>`;
+    html += `<span style="color: var(--primary); font-weight: bold;">${escapeHtml(token.text)}</span>`;
+    html += `<span style="color: #888; font-size: 10px;"> (${escapeHtml(translatePOS(token.pos))})</span>`;
+    html += `<span style="color: #ff9632; margin-left: 8px;">← ${escapeHtml(translateDep(token.rel))}</span>`;
+    html += `</div>`;
+    
+    // 递归构建子树，传递正确的祖先前缀
+    const childLevel = level + 1;
+    const childHtml = buildDependencyTreeFromHeadId(tokenMap, token.id, allTokens, childLevel, new Set(visited), childAncestorPrefix);
+    if (childHtml) {
+      html += childHtml;
+    }
+  });
+  
+  return html;
+}
+
+/**
+ * 初始化句法分析模块
+ */
+function initSyntaxAnalysis() {
+  const analyzeBtn = document.getElementById('btn-syntax-analyze');
+  const clearBtn = document.getElementById('btn-syntax-clear');
+  const expandBtn = document.getElementById('btn-syntax-expand');
+  const input = document.getElementById('syntax-input');
+  
+  if (analyzeBtn) {
+    analyzeBtn.addEventListener('click', () => {
+      performSyntaxAnalysis();
+    });
+  }
+  
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      if (input) input.value = '';
+      const resultsDiv = document.getElementById('syntax-results');
+      if (resultsDiv) resultsDiv.innerHTML = '';
+      if (expandBtn) expandBtn.style.display = 'none';
+    });
+  }
+  
+  if (expandBtn) {
+    expandBtn.addEventListener('click', () => {
+      showSyntaxModal();
+    });
+  }
+  
+  // 按 Ctrl+Enter 快速分析
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'Enter') {
+        performSyntaxAnalysis();
+      }
+    });
+  }
+  
+  // 初始化弹窗关闭按钮
+  const closeBtn = document.getElementById('btn-close-syntax');
+  const modal = document.getElementById('syntax-modal');
+  
+  if (closeBtn) {
+    closeBtn.addEventListener('click', closeSyntaxModal);
+  }
+  
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) {
+        closeSyntaxModal();
+      }
+    });
+  }
+}
+
+/**
+ * 执行句法分析
+ */
+async function performSyntaxAnalysis() {
+  const input = document.getElementById('syntax-input');
+  const resultsDiv = document.getElementById('syntax-results');
+  
+  if (!input || !resultsDiv) return;
+  
+  const text = input.value.trim();
+  
+  if (!text) {
+    resultsDiv.innerHTML = '<span style="color: var(--muted);">请输入俄语句子</span>';
+    return;
+  }
+  
+  // 显示加载状态
+  resultsDiv.innerHTML = '<span style="color: var(--primary);">分析中...</span>';
+  
+  try {
+    const response = await fetch('/api/syntax/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text })
+    });
+    
+    const data = await response.json();
+    
+    if (data.status === 'success') {
+      displaySyntaxResults(data);
+    } else {
+      resultsDiv.innerHTML = `<span style="color: var(--danger);">分析失败: ${escapeHtml(data.error)}</span>`;
+    }
+  } catch (error) {
+    console.error('句法分析请求失败:', error);
+    resultsDiv.innerHTML = `<span style="color: var(--danger);">请求失败: ${escapeHtml(error.message)}</span>`;
+  }
+}
+
+/**
+ * 显示句法分析结果
+ */
+function displaySyntaxResults(data) {
+  const resultsDiv = document.getElementById('syntax-results');
+  if (!resultsDiv) return;
+  
+  const sentences = data.sentences || [];
+  const entities = data.entities || [];
+  
+  if (sentences.length === 0) {
+    resultsDiv.innerHTML = '<span style="color: var(--muted);">未检测到句子</span>';
+    return;
+  }
+  
+  let html = '';
+  
+  sentences.forEach((sent, sentIdx) => {
+    // 创建 ID 到 token 的映射
+    const tokenMap = {};
+    sent.tokens.forEach(token => {
+      // 使用多种键格式确保查找到token：整数格式和字符串格式
+      tokenMap[token.id] = token;
+      tokenMap[String(token.id)] = token;
+    });
+    
+    html += `<div style="margin-bottom: 20px; padding: 12px; background: rgba(100, 200, 255, 0.08); border-radius: 4px; border-left: 3px solid var(--primary);">`;
+    
+    // 显示句子文本
+    html += `<div style="margin-bottom: 10px; font-weight: bold; color: var(--primary); font-size: 14px;">
+      <span style="font-size: 12px; color: var(--muted);">[句子 ${sentIdx + 1}]</span><br>
+      ${escapeHtml(sent.text)}
+    </div>`;
+    
+    // 显示命名实体（如果有）- 只显示属于当前句子的实体
+    const sentEntities = entities.filter(entity => {
+      // 检查实体是否在当前句子的文本范围内
+      return sent.text.includes(entity.text);
+    });
+    
+    if (sentEntities.length > 0) {
+      html += `<div style="margin-bottom: 10px;">`;
+      html += `<div style="font-size: 11px; color: var(--muted); margin-bottom: 6px; font-weight: bold;">🧠 命名实体识别:</div>`;
+      html += `<div style="display: flex; flex-wrap: wrap; gap: 6px;">`;
+      
+      sentEntities.forEach(entity => {
+        const typeColor = entity.type === 'PER' ? '#ff9632' : 
+                         entity.type === 'LOC' ? '#64c8ff' : 
+                         entity.type === 'ORG' ? '#9c64ff' : '#88cc88';
+        
+        html += `<div style="
+          padding: 4px 8px;
+          background: rgba(100, 200, 255, 0.1);
+          border: 1px solid ${typeColor};
+          border-radius: 3px;
+          font-size: 11px;
+        ">
+          <span style="font-weight: bold; color: ${typeColor};">${escapeHtml(entity.text)}</span>
+          <span style="color: var(--muted); margin-left: 4px; font-size: 10px;">[${escapeHtml(translateEntityType(entity.type))}]</span>
+          ${entity.normal && entity.normal !== entity.text ? 
+            `<br><span style="color: #888; font-size: 10px;">→ ${escapeHtml(entity.normal)}</span>` : ''}
+        </div>`;
+      });
+      
+      html += `</div></div>`;
+    }
+    
+    // 显示词汇表格
+    if (sent.tokens && sent.tokens.length > 0) {
+      html += `<div style="margin-bottom: 10px;">`;
+      html += `<div style="font-size: 11px; color: var(--muted); margin-bottom: 6px; font-weight: bold;">📝 词法分析:</div>`;
+      
+      // 添加横向滚动容器
+      html += `<div style="overflow-x: auto; max-width: 100%;">`;
+      // 使用表格显示 - 自适应宽度
+      html += `<table style="width: auto; border-collapse: collapse; font-size: 11px; background: rgba(0,0,0,0.05); border-radius: 3px; overflow: hidden;">`;
+      html += `<thead><tr style="background: rgba(100, 200, 255, 0.2); font-weight: bold;">
+        <th style="padding: 4px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.2); white-space: nowrap;">词形</th>
+        <th style="padding: 4px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.2); white-space: nowrap;">原型</th>
+        <th style="padding: 4px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.2); white-space: nowrap;">词性</th>
+        <th style="padding: 4px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.2); white-space: nowrap;">依存关系</th>
+        <th style="padding: 4px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.2); white-space: nowrap;">支配词</th>
+      </tr></thead><tbody>`;
+      
+      sent.tokens.forEach(token => {
+        const isRoot = token.rel === 'root';
+        const bgColor = isRoot ? 'rgba(255, 150, 50, 0.1)' : 'transparent';
+        const headToken = token.head_id ? tokenMap[token.head_id] : null;
+        
+        html += `<tr style="background: ${bgColor};">
+          <td style="padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); font-weight: bold; color: var(--primary); white-space: nowrap;">${escapeHtml(token.text)}</td>
+          <td style="padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); white-space: nowrap;">
+            <span class="syntax-lemma-link" data-word="${escapeHtml(token.lemma)}" style="color: #88c; cursor: pointer; text-decoration: underline; text-decoration-style: dotted;" title="点击查词">${escapeHtml(token.lemma)}</span>
+          </td>
+          <td style="padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); color: #64c8ff; white-space: nowrap;">${escapeHtml(translatePOS(token.pos))}</td>
+          <td style="padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ff9632; font-weight: ${isRoot ? 'bold' : 'normal'}; white-space: nowrap;">${escapeHtml(translateDep(token.rel || '-'))}</td>
+          <td style="padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--muted); white-space: nowrap;">${headToken ? escapeHtml(headToken.text) : (isRoot ? '根' : '-')}</td>
+        </tr>`;
+      });
+      
+      html += `</tbody></table>`;
+      html += `</div>`; // 关闭滚动容器
+      html += `</div>`;
+    }
+    
+    // 显示依存关系树（树状结构）
+    if (sent.tokens && sent.tokens.length > 0) {
+      html += `<div style="margin-top: 10px;">`;
+      html += `<div style="font-size: 11px; color: var(--muted); margin-bottom: 6px; font-weight: bold;">🌳 依存关系树:</div>`;
+      html += `<div style="background: rgba(0,0,0,0.1); padding: 8px; border-radius: 3px; overflow-x: auto; max-width: 100%;">`;
+      html += `<div style="font-size: 11px; white-space: nowrap; display: inline-block; min-width: 100%;">`;
+      
+      // 找到根节点：使用多层启发式方法
+      let rootToken = null;
+      
+      // 方法1：找rel=root的token
+      rootToken = sent.tokens.find(t => t.rel === 'root');
+      
+      // 方法2：找head_id为0、null或自己的token
+      if (!rootToken) {
+        rootToken = sent.tokens.find(t => !t.head_id || t.head_id === t.id || t.head_id === '0');
+      }
+      
+      // 方法3：构建head关系图，找那个依赖链最长的token（最可能是根）
+      if (!rootToken) {
+        let maxDepth = -1;
+        let candidateRoot = null;
+        
+        sent.tokens.forEach(token => {
+          let depth = 0;
+          let current = token;
+          const visited = new Set();
+          
+          // 沿着head_id往上走，计算深度
+          while (current && current.head_id && !visited.has(String(current.id))) {
+            visited.add(String(current.id));
+            const nextToken = tokenMap[current.head_id] || tokenMap[String(current.head_id)];
+            if (!nextToken) break;
+            current = nextToken;
+            depth++;
+            if (depth > 100) break; // 防止无限循环
+          }
+          
+          if (depth > maxDepth) {
+            maxDepth = depth;
+            candidateRoot = token;
+          }
+        });
+        
+        rootToken = candidateRoot;
+      }
+      
+      // 方法4：找最可能是主动词的token（POS=VERB且较早出现）
+      if (!rootToken) {
+        rootToken = sent.tokens.find(t => t.pos === 'VERB') || sent.tokens[0];
+      }
+      
+      console.log('[根节点查找] 最终根节点:', rootToken, '(depth strategy)');
+      
+      if (rootToken) {
+        html += `<div style="padding: 2px 0; line-height: 1.5; font-family: 'Consolas', monospace;">`;
+        html += `<span style="color: #ff9632; font-weight: bold;">${escapeHtml(rootToken.text)}</span>`;
+        html += `<span style="color: #888; font-size: 10px;"> (${escapeHtml(translatePOS(rootToken.pos))})</span>`;
+        html += `<span style="color: var(--muted); margin-left: 8px;">[根节点]</span>`;
+        html += `</div>`;
+        
+        // 使用新的函数，直接从head_id构建树
+        html += buildDependencyTreeFromHeadId(tokenMap, rootToken.id, sent.tokens, 1);
+      }
+      
+      html += `</div>`;  // 关闭 white-space: nowrap 的内层 div
+      html += `</div></div>`;  // 关闭 overflow container 和外层 div
+    }
+    
+    html += `</div>`;
+  });
+  
+  resultsDiv.innerHTML = html;
+  
+  // 添加原型点击事件
+  resultsDiv.querySelectorAll('.syntax-lemma-link').forEach(link => {
+    link.addEventListener('click', function() {
+      const word = this.getAttribute('data-word');
+      if (word && window.quickDictionarySearch) {
+        window.quickDictionarySearch(word, 'dictionary');
+      }
+    });
+  });
+  
+  // 显示放大按钮
+  const expandBtn = document.getElementById('btn-syntax-expand');
+  if (expandBtn && (sentences.length > 0 || entities.length > 0)) {
+    expandBtn.style.display = 'inline-block';
+    // 保存数据供放大展示使用
+    window.currentSyntaxData = data;
+  }
+}
+
+/**
+ * 显示句法分析放大弹窗
+ */
+function showSyntaxModal() {
+  const modal = document.getElementById('syntax-modal');
+  const content = document.getElementById('syntax-modal-content');
+  
+  if (!modal || !content) return;
+  
+  // 使用保存的数据重新渲染（完整版本）
+  if (window.currentSyntaxData) {
+    const data = window.currentSyntaxData;
+    const sentences = data.sentences || [];
+    const entities = data.entities || [];
+    
+    let html = '';
+    
+    // 显示原始文本
+    html += `<div style="margin-bottom: 20px; padding: 16px; background: rgba(100, 200, 255, 0.1); border-radius: 6px; border-left: 4px solid var(--primary);">`;
+    html += `<div style="font-size: 13px; color: var(--muted); margin-bottom: 8px; font-weight: bold;">📄 原始文本</div>`;
+    html += `<div style="font-size: 15px; line-height: 1.6; color: var(--primary);">${escapeHtml(data.text)}</div>`;
+    html += `</div>`;
+    
+    sentences.forEach((sent, sentIdx) => {
+      const tokenMap = {};
+      sent.tokens.forEach(token => {
+        // 使用多种键格式确保查找到token：整数格式和字符串格式
+        tokenMap[token.id] = token;
+        tokenMap[String(token.id)] = token;
+      });
+      
+      html += `<div style="margin-bottom: 30px; padding: 16px; background: rgba(100, 200, 255, 0.08); border-radius: 6px; border-left: 3px solid var(--primary);">`;
+      
+      // 显示句子文本
+      html += `<div style="margin-bottom: 16px; font-weight: bold; color: var(--primary); font-size: 16px;">`;
+      html += `<span style="font-size: 13px; color: var(--muted);">[句子 ${sentIdx + 1}]</span><br>`;
+      html += `${escapeHtml(sent.text)}`;
+      html += `</div>`;
+      
+      // 显示命名实体（如果有）- 只显示属于当前句子的实体
+      const sentEntities = entities.filter(entity => {
+        // 检查实体是否在当前句子的文本范围内
+        return sent.text.includes(entity.text);
+      });
+      
+      if (sentEntities.length > 0) {
+        html += `<div style="margin-bottom: 16px;">`;
+        html += `<div style="font-size: 13px; color: var(--muted); margin-bottom: 8px; font-weight: bold;">🧠 命名实体识别:</div>`;
+        html += `<div style="display: flex; flex-wrap: wrap; gap: 8px;">`;
+        
+        sentEntities.forEach(entity => {
+          const typeColor = entity.type === 'PER' ? '#ff9632' : 
+                           entity.type === 'LOC' ? '#64c8ff' : 
+                           entity.type === 'ORG' ? '#9c64ff' : '#88cc88';
+          
+          html += `<div style="padding: 6px 10px; background: rgba(100, 200, 255, 0.1); border: 1px solid ${typeColor}; border-radius: 4px; font-size: 13px;">`;
+          html += `<span style="font-weight: bold; color: ${typeColor};">${escapeHtml(entity.text)}</span>`;
+          html += `<span style="color: var(--muted); margin-left: 6px; font-size: 11px;">[${escapeHtml(translateEntityType(entity.type))}]</span>`;
+          if (entity.normal && entity.normal !== entity.text) {
+            html += `<br><span style="color: #888; font-size: 11px;">→ ${escapeHtml(entity.normal)}</span>`;
+          }
+          html += `</div>`;
+        });
+        
+        html += `</div></div>`;
+      }
+      
+      // 显示词汇表格
+      if (sent.tokens && sent.tokens.length > 0) {
+        html += `<div style="margin-bottom: 16px;">`;
+        html += `<div style="font-size: 13px; color: var(--muted); margin-bottom: 8px; font-weight: bold;">📝 词法分析:</div>`;
+        html += `<div style="overflow-x: auto;">`;
+        html += `<table style="width: 100%; min-width: 600px; border-collapse: collapse; font-size: 13px; background: rgba(0,0,0,0.05); border-radius: 4px; overflow: hidden;">`;
+        html += `<thead><tr style="background: rgba(100, 200, 255, 0.2); font-weight: bold;">`;
+        html += `<th style="padding: 8px 10px; text-align: left; border-bottom: 2px solid rgba(255,255,255,0.2);">词形</th>`;
+        html += `<th style="padding: 8px 10px; text-align: left; border-bottom: 2px solid rgba(255,255,255,0.2);">原型</th>`;
+        html += `<th style="padding: 8px 10px; text-align: left; border-bottom: 2px solid rgba(255,255,255,0.2);">词性</th>`;
+        html += `<th style="padding: 8px 10px; text-align: left; border-bottom: 2px solid rgba(255,255,255,0.2);">依存关系</th>`;
+        html += `<th style="padding: 8px 10px; text-align: left; border-bottom: 2px solid rgba(255,255,255,0.2);">支配词</th>`;
+        html += `</tr></thead><tbody>`;
+        
+        sent.tokens.forEach(token => {
+          const isRoot = token.rel === 'root';
+          const bgColor = isRoot ? 'rgba(255, 150, 50, 0.12)' : 'transparent';
+          const headToken = token.head_id ? tokenMap[token.head_id] : null;
+          
+          html += `<tr style="background: ${bgColor};">`;
+          html += `<td style="padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.1); font-weight: bold; color: var(--primary);">${escapeHtml(token.text)}</td>`;
+          html += `<td style="padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.1);">`;
+          html += `<span class="syntax-lemma-link" data-word="${escapeHtml(token.lemma)}" style="color: #88c; cursor: pointer; text-decoration: underline; text-decoration-style: dotted;" title="点击查词">${escapeHtml(token.lemma)}</span>`;
+          html += `</td>`;
+          html += `<td style="padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: #64c8ff;">${escapeHtml(translatePOS(token.pos))}</td>`;
+          html += `<td style="padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ff9632; font-weight: ${isRoot ? 'bold' : 'normal'};">${escapeHtml(translateDep(token.rel || '-'))}</td>`;
+          html += `<td style="padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--muted);">${headToken ? escapeHtml(headToken.text) : (isRoot ? '根' : '-')}</td>`;
+          html += `</tr>`;
+        });
+        
+        html += `</tbody></table></div></div>`;
+      }
+      
+      // 显示依存关系树
+      if (sent.tokens && sent.tokens.length > 0) {
+        html += `<div style="margin-top: 16px;">`;
+        html += `<div style="font-size: 13px; color: var(--muted); margin-bottom: 8px; font-weight: bold;">🌳 依存关系树:</div>`;
+        html += `<div style="background: rgba(0,0,0,0.1); padding: 12px; border-radius: 4px; overflow-x: auto; max-width: 100%;">`;
+        html += `<div style="font-size: 13px; white-space: nowrap; display: inline-block; min-width: 100%;">`;
+        
+        // 找到根节点：使用多层启发式方法
+        let rootToken = null;
+        
+        // 方法1：找rel=root的token
+        rootToken = sent.tokens.find(t => t.rel === 'root');
+        
+        // 方法2：找head_id为0、null或自己的token
+        if (!rootToken) {
+          rootToken = sent.tokens.find(t => !t.head_id || t.head_id === t.id || t.head_id === '0');
+        }
+        
+        // 方法3：构建head关系图，找那个依赖链最长的token（最可能是根）
+        if (!rootToken) {
+          let maxDepth = -1;
+          let candidateRoot = null;
+          
+          sent.tokens.forEach(token => {
+            let depth = 0;
+            let current = token;
+            const visited = new Set();
+            
+            // 沿着head_id往上走，计算深度
+            while (current && current.head_id && !visited.has(String(current.id))) {
+              visited.add(String(current.id));
+              const nextToken = tokenMap[current.head_id] || tokenMap[String(current.head_id)];
+              if (!nextToken) break;
+              current = nextToken;
+              depth++;
+              if (depth > 100) break; // 防止无限循环
+            }
+            
+            if (depth > maxDepth) {
+              maxDepth = depth;
+              candidateRoot = token;
+            }
+          });
+          
+          rootToken = candidateRoot;
+        }
+        
+        // 方法4：找最可能是主动词的token（POS=VERB且较早出现）
+        if (!rootToken) {
+          rootToken = sent.tokens.find(t => t.pos === 'VERB') || sent.tokens[0];
+        }
+        
+        if (rootToken) {
+          html += `<div style="padding: 3px 0; line-height: 1.6; font-family: 'Consolas', monospace;">`;
+          html += `<span style="color: #ff9632; font-weight: bold; font-size: 14px;">${escapeHtml(rootToken.text)}</span>`;
+          html += `<span style="color: #888; font-size: 12px;"> (${escapeHtml(translatePOS(rootToken.pos))})</span>`;
+          html += `<span style="color: var(--muted); margin-left: 10px;">[根节点]</span>`;
+          html += `</div>`;
+          
+          // 使用新的函数，直接从head_id构建树
+          html += buildDependencyTreeFromHeadId(tokenMap, rootToken.id, sent.tokens, 1);
+        }
+        
+        html += `</div></div></div>`;
+      }
+      
+      html += `</div>`;
+    });
+    
+    content.innerHTML = html;
+    
+    // 添加原型点击事件
+    content.querySelectorAll('.syntax-lemma-link').forEach(link => {
+      link.addEventListener('click', function() {
+        const word = this.getAttribute('data-word');
+        if (word && window.quickDictionarySearch) {
+          window.quickDictionarySearch(word, 'dictionary');
+          // 关闭句法分析弹窗，显示词典
+          closeSyntaxModal();
+        }
+      });
+    });
+  }
+  
+  modal.style.display = 'flex';
+}
+
+/**
+ * 关闭句法分析弹窗
+ */
+function closeSyntaxModal() {
+  const modal = document.getElementById('syntax-modal');
+  if (modal) {
+    modal.style.display = 'none';
+  }
 }

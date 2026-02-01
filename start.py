@@ -277,8 +277,8 @@ def main():
             print(f"[DEBUG] App object: {app.app}")
             print(f"[DEBUG] App routes: {list(app.app.url_map.iter_rules())}")
             
-            # 启动应用
-            app.app.run(host="127.0.0.1", port=5000, debug=True)
+            # 启动应用（禁用重载器，避免在调试器中触发 SystemExit:3）
+            app.app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)
         except KeyboardInterrupt:
             print(f"\n\n{C.GREEN}👋 应用已停止{C.RESET}")
             return 0

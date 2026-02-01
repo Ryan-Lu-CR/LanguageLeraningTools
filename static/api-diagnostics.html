@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API 诊断工具</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f9f9f9;
+            border-left: 4px solid #007bff;
+            border-radius: 4px;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        .status-ok {
+            background: #28a745;
+        }
+        .status-error {
+            background: #dc3545;
+        }
+        .status-pending {
+            background: #ffc107;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 pymorphy2 API 诊断工具</h1>
+        
+        <div class="test-section">
+            <h2>1️⃣ 服务器状态检查</h2>
+            <button onclick="checkServerStatus()">检查服务器</button>
+            <div id="serverStatus"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>2️⃣ 获取单个词的原型</h2>
+            <div class="input-group">
+                <input type="text" id="singleWord" placeholder="输入俄语词汇（如: работают）" value="работают">
+                <button onclick="testSingleWord()">测试</button>
+            </div>
+            <div id="singleResult"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>3️⃣ 批量获取原型</h2>
+            <div class="input-group">
+                <input type="text" id="multipleWords" placeholder="输入多个词汇，用逗号分隔" value="работают,красивая,говорил">
+                <button onclick="testMultipleWords()">测试</button>
+            </div>
+            <div id="multiResult"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>4️⃣ 完整诊断报告</h2>
+            <button onclick="runFullDiagnostics()">运行诊断</button>
+            <div id="diagnosticsResult"></div>
+        </div>
+
+        <div class="test-section" style="background: #e7f3ff; border-left-color: #2196F3;">
+            <h2>📝 调试说明</h2>
+            <p>如果测试失败，请查看浏览器控制台 (F12) 中的错误信息。</p>
+            <p><strong>常见问题：</strong></p>
+            <ul>
+                <li>404 错误：请执行硬刷新 (Ctrl+Shift+R)</li>
+                <li>网络错误：确保应用正在运行在 http://localhost:5000</li>
+                <li>JSON 解析错误：后端可能崩溃了，检查服务器日志</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        async function checkServerStatus() {
+            const resultDiv = document.getElementById('serverStatus');
+            resultDiv.innerHTML = '<div class="result info"><span class="spinner"></span>检查中...</div>';
+            
+            try {
+                const response = await fetch('/api/health');
+                if (response.ok) {
+                    resultDiv.innerHTML = '<div class="result success"><span class="status-indicator status-ok"></span>✅ 服务器正常运行</div>';
+                } else {
+                    resultDiv.innerHTML = '<div class="result error"><span class="status-indicator status-error"></span>❌ 服务器响应异常 (状态: ' + response.status + ')</div>';
+                }
+            } catch (e) {
+                resultDiv.innerHTML = '<div class="result error"><span class="status-indicator status-error"></span>❌ 无法连接到服务器: ' + e.message + '</div>';
+            }
+        }
+
+        async function testSingleWord() {
+            const word = document.getElementById('singleWord').value.trim();
+            const resultDiv = document.getElementById('singleResult');
+            
+            if (!word) {
+                resultDiv.innerHTML = '<div class="result error">请输入一个词汇</div>';
+                return;
+            }
+
+            resultDiv.innerHTML = '<div class="result info"><span class="spinner"></span>请求中...</div>';
+            
+            try {
+                const response = await fetch('/api/morph/get-lemma', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({word: word})
+                });
+                
+                if (response.status === 404) {
+                    resultDiv.innerHTML = '<div class="result error"><span class="status-indicator status-error"></span>❌ API 端点返回 404<br>请执行硬刷新 (Ctrl+Shift+R) 并重试</div>';
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    resultDiv.innerHTML = `<div class="result success">
+                        <span class="status-indicator status-ok"></span>✅ 成功<br>
+                        <strong>输入词：</strong> ${data.word}<br>
+                        <strong>原型：</strong> ${data.lemma}
+                    </div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="result error">
+                        <span class="status-indicator status-error"></span>❌ 请求失败<br>
+                        错误: ${data.error || '未知错误'}
+                    </div>`;
+                }
+            } catch (e) {
+                resultDiv.innerHTML = `<div class="result error">
+                    <span class="status-indicator status-error"></span>❌ 请求异常<br>
+                    ${e.message}
+                </div>`;
+            }
+        }
+
+        async function testMultipleWords() {
+            const wordsStr = document.getElementById('multipleWords').value.trim();
+            const resultDiv = document.getElementById('multiResult');
+            
+            if (!wordsStr) {
+                resultDiv.innerHTML = '<div class="result error">请输入至少一个词汇</div>';
+                return;
+            }
+
+            const words = wordsStr.split(',').map(w => w.trim()).filter(w => w);
+            resultDiv.innerHTML = '<div class="result info"><span class="spinner"></span>请求中...</div>';
+            
+            try {
+                const response = await fetch('/api/morph/get-lemma', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({words: words})
+                });
+                
+                const data = await response.json();
+                
+                if (data.status === 'success' && data.lemmas) {
+                    let html = '<div class="result success"><span class="status-indicator status-ok"></span>✅ 成功<br><strong>结果：</strong><br>';
+                    for (const [word, lemma] of Object.entries(data.lemmas)) {
+                        html += `• ${word} → ${lemma}<br>`;
+                    }
+                    html += '</div>';
+                    resultDiv.innerHTML = html;
+                } else {
+                    resultDiv.innerHTML = `<div class="result error">
+                        <span class="status-indicator status-error"></span>❌ 请求失败<br>
+                        ${JSON.stringify(data, null, 2)}
+                    </div>`;
+                }
+            } catch (e) {
+                resultDiv.innerHTML = `<div class="result error">
+                    <span class="status-indicator status-error"></span>❌ 请求异常<br>
+                    ${e.message}
+                </div>`;
+            }
+        }
+
+        async function runFullDiagnostics() {
+            const resultDiv = document.getElementById('diagnosticsResult');
+            resultDiv.innerHTML = '<div class="result info"><span class="spinner"></span>运行诊断中...</div>';
+            
+            let report = '<div class="result success"><span class="status-indicator status-ok"></span><strong>诊断报告：</strong><br>';
+            let allPassed = true;
+
+            // 检查 1: 服务器
+            try {
+                const response = await fetch('/api/health');
+                if (response.ok) {
+                    report += '✅ 服务器连接正常<br>';
+                } else {
+                    report += '❌ 服务器响应异常<br>';
+                    allPassed = false;
+                }
+            } catch (e) {
+                report += '❌ 无法连接到服务器<br>';
+                allPassed = false;
+            }
+
+            // 检查 2: API 端点
+            try {
+                const response = await fetch('/api/morph/get-lemma', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({word: 'тест'})
+                });
+                
+                if (response.status === 200) {
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        report += '✅ API 端点正常 (/api/morph/get-lemma)<br>';
+                    } else {
+                        report += '❌ API 返回错误: ' + data.error + '<br>';
+                        allPassed = false;
+                    }
+                } else if (response.status === 404) {
+                    report += '❌ API 端点返回 404 - 请执行硬刷新<br>';
+                    allPassed = false;
+                } else {
+                    report += '❌ API 返回意外的状态码: ' + response.status + '<br>';
+                    allPassed = false;
+                }
+            } catch (e) {
+                report += '❌ API 请求失败: ' + e.message + '<br>';
+                allPassed = false;
+            }
+
+            // 检查 3: 测试词汇
+            try {
+                const testWords = ['работают', 'красивая', 'говорил'];
+                const response = await fetch('/api/morph/get-lemma', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({words: testWords})
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    report += '✅ 测试词汇处理成功<br>';
+                    for (const word of testWords) {
+                        if (data.lemmas && data.lemmas[word]) {
+                            report += `  • ${word} → ${data.lemmas[word]}<br>`;
+                        }
+                    }
+                } else {
+                    report += '❌ 测试词汇处理失败<br>';
+                    allPassed = false;
+                }
+            } catch (e) {
+                report += '❌ 测试词汇处理异常: ' + e.message + '<br>';
+                allPassed = false;
+            }
+
+            // 检查 4: 前端状态
+            if (typeof state !== 'undefined' && state.vocab) {
+                report += `✅ 前端状态正常 (词汇数: ${state.vocab.length})<br>`;
+            } else {
+                report += '⚠️ 无法检查前端状态<br>';
+            }
+
+            if (allPassed) {
+                report += '<br>🎉 所有检查通过！';
+                resultDiv.innerHTML = report + '</div>';
+            } else {
+                report = report.replace('success', 'error').replace('✅', '⚠️');
+                report += '<br><strong>建议：</strong><br>';
+                report += '1. 执行硬刷新 (Ctrl+Shift+R)<br>';
+                report += '2. 检查浏览器控制台 (F12) 中的错误<br>';
+                report += '3. 查看后端日志<br>';
+                report += '4. 重启应用';
+                resultDiv.innerHTML = report + '</div>';
+            }
+        }
+
+        // 页面加载时自动检查服务器
+        window.addEventListener('load', () => {
+            checkServerStatus();
+        });
+    </script>
+</body>
+</html>

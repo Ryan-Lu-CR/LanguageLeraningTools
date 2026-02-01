@@ -3,13 +3,16 @@ import shutil
 import html
 import tempfile
 from pathlib import Path
-from urllib.request import urlretrieve
+from urllib.request import urlretrieve, urlopen, Request
+from urllib.parse import quote
 from typing import List, Dict, Any
 import io
 import sys
 import re
 import mimetypes
 import base64
+import hashlib
+import os
 
 from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
@@ -44,6 +47,64 @@ try:
     import pymorphy2  # type: ignore
 except ImportError:
     pymorphy2 = None
+
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except ImportError:
+    BeautifulSoup = None
+
+try:
+    import pyttsx3  # type: ignore
+except ImportError:
+    pyttsx3 = None
+
+try:
+    from natasha import Segmenter, MorphVocab, NewsEmbedding, NewsMorphTagger, NewsSyntaxParser, NewsNERTagger, Doc  # type: ignore
+    natasha_available = True
+    print("✓ Natasha 库已成功导入")
+except ImportError as e:
+    natasha_available = False
+    Segmenter = None
+    MorphVocab = None
+    NewsEmbedding = None
+    NewsMorphTagger = None
+    NewsSyntaxParser = None
+    NewsNERTagger = None
+    Doc = None
+    print(f"⚠️ Natasha 库导入失败: {e}")
+except Exception as e:
+    natasha_available = False
+    Segmenter = None
+    MorphVocab = None
+    NewsEmbedding = None
+    NewsMorphTagger = None
+    NewsSyntaxParser = None
+    NewsNERTagger = None
+    Doc = None
+    print(f"⚠️ Natasha 库初始化错误: {e}")
+
+# 导入俄语形态分析工具
+try:
+    # 确保可以从同一目录导入
+    import sys
+    from pathlib import Path as PathlibPath
+    if str(PathlibPath(__file__).parent) not in sys.path:
+        sys.path.insert(0, str(PathlibPath(__file__).parent))
+    
+    from morph_utils import get_analyzer, get_matcher, MorphAnalyzer, VocabMatcher  # type: ignore
+    print("✓ 形态分析工具已导入")
+except ImportError as e:
+    print(f"⚠️ 形态分析工具导入失败: {e}")
+    get_analyzer = None
+    get_matcher = None
+    MorphAnalyzer = None
+    VocabMatcher = None
+except Exception as e:
+    print(f"⚠️ 形态分析工具初始化出错: {e}")
+    get_analyzer = None
+    get_matcher = None
+    MorphAnalyzer = None
+    VocabMatcher = None
 
 # pymorphy2 兼容性补丁（修复 Python 3.11+ 的 getargspec 问题）
 if pymorphy2 is not None:
@@ -80,13 +141,22 @@ CONFIG_DIR = Path(__file__).parent.parent / "config"
 MODELS_DIR = Path(__file__).parent.parent / "models"
 USER_DATA_DIR.mkdir(exist_ok=True)
 
-def get_user_file_path(filename: str, subdir: str = "") -> Path:
+def get_user_file_path(filename: str, subdir: str = "", create: bool = True) -> Path:
     """获取用户数据文件路径"""
     if subdir:
         target_dir = USER_DATA_DIR / subdir
-        target_dir.mkdir(exist_ok=True)
+        if create:
+            target_dir.mkdir(exist_ok=True)
         return target_dir / filename
     return USER_DATA_DIR / filename
+
+
+def get_user_subdir(subdir: str, create: bool = True) -> Path:
+    """获取用户数据子目录路径"""
+    target_dir = USER_DATA_DIR / subdir
+    if create:
+        target_dir.mkdir(exist_ok=True)
+    return target_dir
 
 
 # --- Whisper helpers -------------------------------------------------------
@@ -342,7 +412,7 @@ def extract_text_from_epub(file_path: str) -> str:
         print(f"DEBUG: epub_hash = {epub_hash}")
         
         # 使用绝对路径保存图片到user_data\readings目录
-        images_dir = USER_DATA_DIR / "readings" / "reading_images" / epub_hash
+        images_dir = USER_DATA_DIR / "reading_images" / epub_hash
         print(f"DEBUG: images_dir = {images_dir}")
         
         try:
@@ -909,7 +979,7 @@ def load_subtitle_file(filename):
         
         # 如果找不到，尝试在 subtitles 目录查找（向后兼容）
         if subtitle_path is None or not subtitle_path.exists():
-            subtitle_path = get_user_file_path(filename, "subtitles")
+            subtitle_path = get_user_file_path(filename, "subtitles", create=False)
         
         if not subtitle_path.exists():
             return jsonify({"status": "not_found", "subtitles": []}), 404
@@ -961,7 +1031,7 @@ def load_subtitles(filename):
         
         # 如果找不到，尝试在 subtitles 目录查找（向后兼容）
         if subtitle_path is None or not subtitle_path.exists():
-            subtitle_path = get_user_file_path(f"{base_name}.json", "subtitles")
+            subtitle_path = get_user_file_path(f"{base_name}.json", "subtitles", create=False)
         
         if subtitle_path.exists():
             with open(subtitle_path, "r", encoding="utf-8") as f:
@@ -1230,11 +1300,26 @@ def load_vocab():
 
 @app.route("/api/vocabbooks/save", methods=["POST"])
 def save_vocabbooks():
-    """保存多个生词本数据到文件"""
+    """保存多个生词本数据到文件，自动识别词汇的原型形式"""
     try:
         payload = request.get_json(force=True)
         vocabbooks = payload.get("vocabBooks", [])
         current_id = payload.get("currentVocabBookId", None)
+        
+        # 使用 pymorphy2 自动识别原型并填充 lemma 字段
+        if get_analyzer is not None:
+            try:
+                analyzer = get_analyzer()
+                for book in vocabbooks:
+                    if "words" in book and isinstance(book["words"], list):
+                        for word_item in book["words"]:
+                            if isinstance(word_item, dict):
+                                word = word_item.get("word", "").strip()
+                                # 如果词汇存在且还没有 lemma，则自动计算
+                                if word and not word_item.get("lemma"):
+                                    word_item["lemma"] = analyzer.get_lemma(word)
+            except Exception as e:
+                print(f"⚠️ 自动识别原型时出错（不影响保存）: {e}")
         
         # 保存生词本数据
         vocabbooks_path = get_user_file_path("vocabbooks.json", "vocab")
@@ -1273,7 +1358,219 @@ def load_vocabbooks():
         return jsonify({"status": "error", "error": str(e), "vocabBooks": [], "currentVocabBookId": None}), 500
 
 
+# ============================================================================
+# 形态分析 API 端点
+# ============================================================================
 
+@app.route("/api/morph/analyze", methods=["POST"])
+def api_morph_analyze():
+    """
+    分析俄语词汇的形态特征（原型、格数、性别、词性等）
+    
+    请求: {"word": "слова"}
+    响应: {
+        "status": "success",
+        "word": "слова",
+        "lemma": "слово",
+        "grammemes": ["neut", "plur", ...],
+        "POS": "NOUN",
+        ...
+    }
+    """
+    try:
+        if get_analyzer is None:
+            return jsonify({"status": "error", "error": "pymorphy2 未安装或初始化失败"}), 500
+        
+        data = request.get_json(force=True)
+        word = data.get("word", "").strip()
+        
+        if not word:
+            return jsonify({"status": "error", "error": "词汇不能为空"}), 400
+        
+        analyzer = get_analyzer()
+        result = analyzer.analyze(word)
+        result["status"] = "success"
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/morph/get-lemma", methods=["POST"])
+def api_morph_get_lemma():
+    """
+    获取俄语词汇的原型（字典形式）
+    
+    请求: {"word": "слова"} 或 {"words": ["слова", "работает"]}
+    响应: {
+        "status": "success",
+        "word": "слова",      // 单词请求时
+        "lemma": "слово",
+        "lemmas": {...}       // 多单词请求时 {"слова": "слово", ...}
+    }
+    """
+    try:
+        if get_analyzer is None:
+            return jsonify({"status": "error", "error": "pymorphy2 未安装或初始化失败"}), 500
+        
+        data = request.get_json(force=True)
+        analyzer = get_analyzer()
+        
+        # 单个词汇
+        word = data.get("word", "").strip()
+        if word:
+            lemma = analyzer.get_lemma(word)
+            return jsonify({
+                "status": "success",
+                "word": word,
+                "lemma": lemma
+            })
+        
+        # 多个词汇
+        words = data.get("words", [])
+        if isinstance(words, list) and words:
+            lemmas = analyzer.batch_get_lemmas(words)
+            return jsonify({
+                "status": "success",
+                "lemmas": lemmas
+            })
+        
+        return jsonify({"status": "error", "error": "必须提供 word 或 words 参数"}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/morph/highlight-text", methods=["POST"])
+def api_morph_highlight_text():
+    """
+    在文本中高亮显示生词本词汇（基于原型匹配）
+    
+    请求: {
+        "text": "длинный текст...",
+        "vocabWords": [
+            {"word": "работать", "meaning": "работать", "lemma": "работать"},
+            ...
+        ]
+    }
+    响应: {
+        "status": "success",
+        "highlighted_text": "<p>...текст с <mark>...</mark>...</p>",
+        "matches": [
+            {
+                "text": "работает",
+                "position": 10,
+                "lemma": "работать",
+                "meaning": "работать"
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        if get_matcher is None:
+            return jsonify({"status": "error", "error": "pymorphy2 未安装或初始化失败"}), 500
+        
+        data = request.get_json(force=True)
+        text = data.get("text", "").strip()
+        vocab_words = data.get("vocabWords", [])
+        
+        if not text:
+            return jsonify({"status": "error", "error": "文本不能为空"}), 400
+        
+        if not vocab_words:
+            return jsonify({
+                "status": "success",
+                "highlighted_text": html.escape(text),
+                "matches": []
+            })
+        
+        matcher = get_matcher()
+        
+        # 准备生词本索引
+        vocab_index = matcher.prepare_vocab_index(vocab_words)
+        
+        # 查找匹配
+        matches = matcher.find_matches_in_text(text, vocab_index)
+        
+        # 生成高亮 HTML
+        highlighted = matcher.highlight_text(text, vocab_index)
+        
+        # 格式化匹配结果
+        matches_info = [
+            {
+                "text": m["text"],
+                "normalized": m["normalized"],
+                "lemma": m["lemma"],
+                "meaning": m["vocab_info"]["meaning"],
+                "note": m["vocab_info"]["note"],
+                "position": m["start"]
+            }
+            for m in matches
+        ]
+        
+        return jsonify({
+            "status": "success",
+            "highlighted_text": highlighted,
+            "matches": matches_info,
+            "match_count": len(matches)
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/morph/analyze-text", methods=["POST"])
+def api_morph_analyze_text():
+    """
+    分析文本中所有俄语词汇的原型
+    
+    请求: {"text": "Я узнала о том, что королева Елизавета принимает письма"}
+    响应: {
+        "status": "success",
+        "text": "Я узнала о том, что королева Елизавета принимает письма",
+        "words": [
+            {"word": "Я", "lemma": "я", "pos": "PRON"},
+            {"word": "узнала", "lemma": "узнать", "pos": "VERB"},
+            ...
+            {"word": "письма", "lemma": "письмо", "pos": "NOUN"},
+        ]
+    }
+    """
+    try:
+        if get_analyzer is None:
+            return jsonify({"status": "error", "error": "pymorphy2 未安装或初始化失败"}), 500
+        
+        data = request.get_json(force=True)
+        text = data.get("text", "").strip()
+        
+        if not text:
+            return jsonify({"status": "error", "error": "文本不能为空"}), 400
+        
+        analyzer = get_analyzer()
+        import re
+        
+        # 提取俄语词汇
+        word_pattern = re.compile(r'[\wа-яА-ЯёЁ]+')
+        words_data = []
+        
+        for match in word_pattern.finditer(text):
+            word = match.group()
+            lemma = analyzer.get_lemma(word)
+            words_data.append({
+                "word": word,
+                "lemma": lemma,
+                "position": match.start(),
+                "length": len(word)
+            })
+        
+        return jsonify({
+            "status": "success",
+            "text": text,
+            "words": words_data
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 @app.route("/api/settings/save", methods=["POST"])
@@ -1819,7 +2116,7 @@ def serve_epub_image(epub_hash, filename):
         print(f"DEBUG: 收到图片请求: epub_hash={epub_hash}, filename={filename}")
         
         # 构建图片路径
-        image_path = USER_DATA_DIR / "readings" / "reading_images" / epub_hash / filename
+        image_path = USER_DATA_DIR / "reading_images" / epub_hash / filename
         print(f"DEBUG: 图片路径: {image_path}")
         
         if not image_path.exists():
@@ -1889,7 +2186,7 @@ def delete_document(doc_id):
 
         # EPUB 图片目录（与提取时一致的 hash 规则）
         epub_hash = hashlib.md5(str(file_path).encode()).hexdigest()[:8]
-        images_dir = USER_DATA_DIR / "readings" / "reading_images" / epub_hash
+        images_dir = USER_DATA_DIR / "reading_images" / epub_hash
 
         # 删除文件/目录
         for p in [file_path, content_path, notes_path, images_dir, converted_pdf_path]:
@@ -2528,6 +2825,16 @@ def index():
         return send_file(str(idx))
     else:
         return jsonify({"status": "error", "message": "index.html not found", "path": str(idx)}), 500
+
+
+@app.route("/api-diagnostics")
+def api_diagnostics():
+    """API 诊断工具页面"""
+    diag_path = Path(__file__).parent.parent / "static" / "api-diagnostics.html"
+    if diag_path.exists():
+        return send_file(str(diag_path))
+    else:
+        return jsonify({"status": "error", "message": "api-diagnostics.html not found"}), 500
 
 
 @app.route("/static/pdf-viewer.html")
@@ -3311,7 +3618,8 @@ def dictionary_lookup():
         "word": "привет",
         "morphology": {...},  # 词法分析结果
         "dictionary": [...],  # 词典查询结果
-        "vocab": {...}        # 生词本中的记录
+        "vocab": {...},       # 生词本中的记录
+        "qianyix": {...}      # 千亿词霸查询链接
     }
     """
     try:
@@ -3327,7 +3635,8 @@ def dictionary_lookup():
             "word": word,
             "morphology": None,
             "dictionary": [],
-            "vocab": None
+            "vocab": None,
+            "qianyix": None
         }
         
         # 词法分析
@@ -3335,9 +3644,24 @@ def dictionary_lookup():
             result["morphology"] = analyze_word_morphology(word)
             # 生成变格形式
             result["inflections"] = generate_word_inflections(word)
+            
+            # 获取原形用于千亿词霸查询
+            if result["morphology"] and result["morphology"].get("analyses"):
+                primary_form = result["morphology"]["analyses"][0].get("normal_form", word)
+            else:
+                primary_form = word
+        else:
+            primary_form = word
         
         # 词典查询
         result["dictionary"] = search_in_dictionaries(word)
+        
+        # 生成千亿词霸查询链接
+        qianyix_url = f"https://w.qianyix.com/index.php?q={quote(primary_form)}"
+        result["qianyix"] = {
+            "word": primary_form,
+            "url": qianyix_url
+        }
         
         # 查询生词本（从所有生词本中查找）
         vocabbooks_path = get_user_file_path("vocabbooks.json", "vocab")
@@ -3356,6 +3680,116 @@ def dictionary_lookup():
         
         return jsonify(result)
     except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/api/tts", methods=["GET"])
+def api_tts():
+    """使用Google TTS获取发音并缓存到用户数据目录"""
+    try:
+        text = (request.args.get("text") or "").strip()
+        lang = (request.args.get("lang") or "ru").strip().lower()
+
+        if not text:
+            return jsonify({"status": "error", "error": "text required"}), 400
+        if len(text) > 200:
+            return jsonify({"status": "error", "error": "text too long"}), 400
+
+        cache_dir = get_user_subdir("tts_cache")
+        key = hashlib.md5(f"{lang}|{text}".encode("utf-8")).hexdigest()
+        cache_path = cache_dir / f"{key}.mp3"
+
+        # 尝试使用缓存
+        if cache_path.exists():
+            file_size = cache_path.stat().st_size
+            if file_size > 100:  # 有效的音频文件应该大于 100 字节
+                print(f"[TTS] 使用缓存: {cache_path.name} ({file_size} 字节)")
+                response = send_file(
+                    cache_path, 
+                    mimetype="audio/mpeg",
+                    as_attachment=False,
+                    conditional=False
+                )
+                response.headers['Accept-Ranges'] = 'bytes'
+                response.headers['Cache-Control'] = 'public, max-age=31536000'
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                return response
+
+        # 尝试从 Google TTS 获取
+        print(f"[TTS] 获取新的音频: '{text[:20]}...' (lang={lang})")
+        try:
+            tts_url = (
+                "https://translate.google.com/translate_tts?ie=UTF-8"
+                f"&client=tw-ob&tl={quote(lang)}&q={quote(text)}"
+            )
+            req = Request(tts_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            
+            with urlopen(req, timeout=10) as resp:
+                audio_bytes = resp.read()
+            
+            if not audio_bytes or len(audio_bytes) < 100:
+                print(f"[TTS] 获取的音频无效 ({len(audio_bytes)} 字节)")
+                raise Exception("获取的音频数据无效")
+            
+            # 保存到缓存
+            cache_path.write_bytes(audio_bytes)
+            print(f"[TTS] 缓存已保存: {cache_path.name} ({len(audio_bytes)} 字节)")
+            
+            response = send_file(
+                cache_path, 
+                mimetype="audio/mpeg",
+                as_attachment=False,
+                conditional=False
+            )
+            response.headers['Accept-Ranges'] = 'bytes'
+            response.headers['Cache-Control'] = 'public, max-age=31536000'
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            return response
+            
+        except Exception as e:
+            print(f"[TTS] Google TTS 获取失败: {e}")
+            
+            # 备选方案：使用本地 TTS (pyttsx3)
+            if pyttsx3:
+                try:
+                    print(f"[TTS] 尝试使用本地 TTS (pyttsx3)")
+                    engine = pyttsx3.init()
+                    
+                    # 设置俄语
+                    engine.setProperty('rate', 150)  # 速度
+                    
+                    # 保存到临时文件
+                    temp_audio = cache_path  # 直接保存到缓存路径
+                    engine.save_to_file(text, str(temp_audio))
+                    engine.runAndWait()
+                    
+                    if temp_audio.exists() and temp_audio.stat().st_size > 100:
+                        print(f"[TTS] 本地 TTS 生成成功: {temp_audio.name}")
+                        response = send_file(
+                            temp_audio, 
+                            mimetype="audio/mpeg",
+                            as_attachment=False,
+                            conditional=False
+                        )
+                        response.headers['Accept-Ranges'] = 'bytes'
+                        response.headers['Cache-Control'] = 'public, max-age=31536000'
+                        response.headers['Access-Control-Allow-Origin'] = '*'
+                        return response
+                except Exception as e2:
+                    print(f"[TTS] 本地 TTS 失败: {e2}")
+            
+            # 返回错误
+            return jsonify({
+                "status": "error", 
+                "error": f"TTS 获取失败: {str(e)}。请检查网络连接或配置本地 TTS。"
+            }), 500
+
+    except Exception as e:
+        print(f"[TTS] 异常: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
@@ -3530,5 +3964,247 @@ def analyze_word(word):
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/api/fetch-webpage", methods=["POST"])
+def fetch_webpage():
+    """获取网页内容，用于在弹窗中显示
+    
+    请求体:
+    {
+        "url": "https://example.com",
+        "selector": "#base0 > div.panel-body.view"  # 可选的CSS选择器
+    }
+    
+    返回:
+    {
+        "status": "success",
+        "content": "...",  # HTML内容或提取的DOM内容
+        "url": "..."
+    }
+    """
+    try:
+        data = request.get_json()
+        url = data.get("url", "").strip()
+        selector = data.get("selector", "")
+        
+        if not url:
+            return jsonify({"status": "error", "error": "URL不能为空"}), 400
+        
+        # 添加用户代理以避免被某些网站拒绝
+        try:
+            from urllib.request import Request
+            req = Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            with urlopen(req, timeout=10) as response:
+                html_content = response.read().decode('utf-8', errors='ignore')
+        except Exception as e:
+            print(f"⚠️ 获取网页失败: {e}")
+            # 如果获取失败，返回原始URL让浏览器处理
+            return jsonify({
+                "status": "error",
+                "error": f"无法获取网页内容: {str(e)}",
+                "url": url
+            }), 500
+        
+        # 如果指定了选择器，尝试提取特定DOM
+        if selector:
+            if BeautifulSoup is None:
+                # 如果没有BeautifulSoup，返回完整HTML
+                return jsonify({
+                    "status": "success",
+                    "content": html_content,
+                    "url": url,
+                    "selector": None
+                })
+            
+            try:
+                soup = BeautifulSoup(html_content, 'html.parser')
+                element = soup.select_one(selector)
+                
+                if element:
+                    # 提取元素并返回其内容
+                    extracted_content = str(element)
+                    return jsonify({
+                        "status": "success",
+                        "content": extracted_content,
+                        "url": url,
+                        "selector": selector,
+                        "found": True
+                    })
+                else:
+                    # 如果找不到元素，返回完整HTML
+                    return jsonify({
+                        "status": "success",
+                        "content": html_content,
+                        "url": url,
+                        "selector": selector,
+                        "found": False
+                    })
+            except Exception as e:
+                print(f"⚠️ DOM提取失败: {e}")
+                # 提取失败时返回完整HTML
+                return jsonify({
+                    "status": "success",
+                    "content": html_content,
+                    "url": url,
+                    "selector": selector,
+                    "found": False
+                })
+        else:
+            return jsonify({
+                "status": "success",
+                "content": html_content,
+                "url": url
+            })
+    
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ============================================================================
+# 句法分析 API 端点（使用 Natasha 库）
+# ============================================================================
+
+@app.route("/api/syntax/analyze", methods=["POST"])
+def api_syntax_analyze():
+    """
+    使用 Natasha 库进行俄语句子句法分析
+    
+    请求: {"text": "Я люблю читать книги."}
+    
+    响应: {
+        "status": "success",
+        "text": "Я люблю читать книги.",
+        "sentences": [
+            {
+                "text": "Я люблю читать книги.",
+                "tokens": [
+                    {
+                        "text": "Я",
+                        "lemma": "я",
+                        "pos": "PRON",
+                        "morphology": {...},
+                        "head_id": 1,
+                        "rel": "nsubj"
+                    },
+                    ...
+                ],
+                "arcs": [
+                    {
+                        "source_idx": 0,
+                        "target_idx": 1,
+                        "rel": "nsubj"
+                    },
+                    ...
+                ]
+            }
+        ]
+    }
+    """
+    try:
+        if not natasha_available:
+            return jsonify({"status": "error", "error": "Natasha 库未安装或初始化失败"}), 500
+        
+        data = request.get_json(force=True)
+        text = data.get("text", "").strip()
+        
+        if not text:
+            return jsonify({"status": "error", "error": "文本不能为空"}), 400
+        
+        try:
+            # 初始化 Natasha 组件
+            segmenter = Segmenter()
+            morph_vocab = MorphVocab()
+            
+            emb = NewsEmbedding()
+            morph_tagger = NewsMorphTagger(emb)
+            syntax_parser = NewsSyntaxParser(emb)
+            ner_tagger = NewsNERTagger(emb)
+            
+            # 创建文档并分析
+            doc = Doc(text)
+            doc.segment(segmenter)
+            doc.tag_morph(morph_tagger)
+            doc.parse_syntax(syntax_parser)
+            doc.tag_ner(ner_tagger)
+            
+            # 词形还原
+            for token in doc.tokens:
+                token.lemmatize(morph_vocab)
+            
+            # 实体规范化
+            for span in doc.spans:
+                span.normalize(morph_vocab)
+            
+            # 构建响应
+            sentences_data = []
+            
+            for sent in doc.sents:
+                tokens = []
+                arcs = []
+                
+                for token in sent.tokens:
+                    token_data = {
+                        "id": token.id,
+                        "text": token.text,
+                        "lemma": token.lemma if hasattr(token, 'lemma') and token.lemma else token.text,
+                        "pos": token.pos if hasattr(token, 'pos') and token.pos else "",
+                        "head_id": token.head_id if hasattr(token, 'head_id') else None,
+                        "rel": token.rel if hasattr(token, 'rel') and token.rel else "",
+                    }
+                    
+                    # 添加形态信息
+                    if hasattr(token, 'feats') and token.feats:
+                        token_data["feats"] = str(token.feats)
+                    
+                    tokens.append(token_data)
+                    
+                    # 构建依存弧
+                    if hasattr(token, 'head_id') and token.head_id is not None and token.head_id != token.id:
+                        arcs.append({
+                            "source_idx": token.head_id,
+                            "target_idx": token.id,
+                            "rel": token.rel if hasattr(token, 'rel') and token.rel else ""
+                        })
+                
+                sentences_data.append({
+                    "text": sent.text,
+                    "tokens": tokens,
+                    "arcs": arcs
+                })
+            
+            # 提取命名实体
+            entities = []
+            for span in doc.spans:
+                entities.append({
+                    "text": span.text,
+                    "type": span.type,
+                    "start": span.start,
+                    "stop": span.stop,
+                    "normal": span.normal if hasattr(span, 'normal') and span.normal else span.text
+                })
+            
+            return jsonify({
+                "status": "success",
+                "text": text,
+                "sentences": sentences_data,
+                "entities": entities
+            })
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                "status": "error",
+                "error": f"分析失败: {str(e)}"
+            }), 500
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(debug=True, host="0.0.0.0", port=5000)
+
